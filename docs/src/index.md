@@ -9,6 +9,8 @@ Documentation for [CFCompressible](https://github.com/dubosipsl/CFCompressible.j
 ```@index
 ```
 
+## General
+
 ```@autodocs
-Modules = [CFCompressible]
+Modules = [CFCompressible, CFCompressible.NH_state]
 ```

@@ -1,0 +1,6 @@
+[deps]
+CFDomains = "3699aaca-035b-4155-96ec-eecb526248de"
+ClimFlowsTestCases = "55a4ed1b-ebae-44a5-bd1f-98d158431b8a"
+ClimFluids = "68475963-a72f-47d4-b871-9c5545ecd1c0"
+Enzyme = "7da242da-08ed-463a-9acd-ee780be4f1d9"
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"

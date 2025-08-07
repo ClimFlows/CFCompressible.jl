@@ -1,0 +1,3 @@
+[deps]
+CFCompressible = "7101e0e9-36cf-46de-90cb-442c992ae42c"
+Documenter = "e30172f5-a6a5-5a46-863b-614d45cd2de4"

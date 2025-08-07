@@ -1,13 +1,24 @@
 name = "CFCompressible"
-uuid = "7101e0e9-36cf-46de-90cb-442c992ae42c"
-authors = ["Thomas Dubos <thomas.dubos@polytechnique.edu> and contributors"]
-version = "1.0.0-DEV"
+uuid = "a33e4613-43be-4f0e-b500-138f013d70af"
+authors = ["Thomas Dubos <thomas.dubos@polytechnique.edu>"]
+version = "0.1.0"
+
+[deps]
+CFBatchSolvers = "4c829458-57b5-4508-983f-2f0f605f5bfa"
+CFDomains = "3699aaca-035b-4155-96ec-eecb526248de"
+CFHydrostatics = "0dc8c93d-0116-402a-b00b-85ddfe5501a2"
+CFPlanets = "9c2ca15e-caec-41c0-a22c-2e93fe5a241f"
+CookBooks = "7bce7c31-0f61-4fd7-bdaf-6b04abfa2cc7"
+ManagedLoops = "36a4119d-6b73-4371-88fe-ba2d91f5495d"
+MutatingOrNot = "6a37069a-9a67-4b2d-a34a-f09ab4b23c7c"
+SHTnsSpheres = "9e5c175a-5132-4517-85a1-2957ec255f89"
 
 [compat]
-julia = "1.6.7"
-
-[extras]
-Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
-
-[targets]
-test = ["Test"]
+CFBatchSolvers = "0.1.0"
+CFDomains = "0.3.5"
+CFHydrostatics = "0.4.1"
+CFPlanets = "0.1.2"
+CookBooks = "0.2.0"
+ManagedLoops = "0.1.13"
+MutatingOrNot = "0.1.4"
+SHTnsSpheres = "0.2.15"

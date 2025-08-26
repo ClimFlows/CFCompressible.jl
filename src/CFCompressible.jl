@@ -14,7 +14,7 @@ function NewtonSolve(; niter=5, flip_solve=false, update_W=false, verbose=false,
     return NewtonSolve(niter, flip_solve, update_W, verbose)
 end
 
-struct FCE{F, Manager, Coord, Domain, Fluid, TwoDimScalar<:AbstractMatrix{F}}
+struct FCE{F, Manager, Coord, Domain, Fluid, TwoDimScalar<:AbstractArray{F}}
     mgr::Manager
     vcoord::Coord
     planet::ShallowTradPlanet{F}
@@ -49,7 +49,9 @@ tendencies!(slow, fast, scratch, model::FCE, state, _, tau) = FCE_tendencies!(sl
 
 include("julia/vertical_dynamics.jl")
 include("julia/horizontal_energies.jl")
+include("julia/zero_arrays.jl")
 include("julia/dynamics.jl")
+include("julia/voronoi_dynamics.jl")
 include("julia/NH_state.jl")
 include("julia/diagnostics.jl")
 

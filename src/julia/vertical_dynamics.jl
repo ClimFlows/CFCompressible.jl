@@ -358,6 +358,12 @@ function batched_bwd_Euler!(model, ps, state, tau, check=false)
     return Phil, Wl, tridiag
 end
 
+function batched_Newton_iteration(tridiag_, mgr, H, mk::M, Sk::M, Phi_star::M, W_star::M, Phil::M, DPhil::M, dPhil::M, tau, iter, flip_solve, check) where { M<:AbstractMatrix}
+    # present 2D arrays as 3D
+    reshp(x::M) = reshape(x, (size(x,1), 1, size(x, 2)))
+    return batched_Newton_iteration(tridiag_, mgr, H, map(reshp, (mk, Sk, Phi_star, W_star, Phil, DPhil, dPhil))..., tau, iter, flip_solve, check)
+end
+
 function batched_Newton_iteration(tridiag_, mgr, H, mk, Sk, Phi_star, W_star, Phil, DPhil, dPhil, tau, iter, flip_solve, check)
     @. Phil = Phi_star + DPhil
     (; R, A, B) = tri = batched_tridiag_problem!(tridiag_, mgr, H, (mk, Sk, Phil), Phi_star, W_star, tau)
@@ -390,6 +396,14 @@ function batched_Newton_iteration(tridiag_, mgr, H, mk, Sk, Phi_star, W_star, Ph
     return tri
 end
 
+#=
+function batched_tridiag_problem!(tridiag, mgr, H, state, Phi_star::M, W_star::M, tau) where { M<:AbstractMatrix}
+    # present 2D arrays as 3D
+    reshp(x::M) = reshape(x, (size(x,1), 1, size(x, 2)))
+    return batched_tridiag_problem!(tridiag, mgr, H, map(reshp, state), reshp(Phi_star), reshp(W_star), tau)
+end
+=#
+
 function batched_tridiag_problem!(tridiag, mgr, H, state, Phi_star, W_star, tau)
     (; Phis, pb, rhob, J, ptop, gravity, gas) = H  # Phis and pb are 2D arrays
     (m, S, Phi) = state # W terms cancel out => ignore W and let W=0
@@ -413,10 +427,10 @@ function batched_tridiag_problem!(tridiag, mgr, H, state, Phi_star, W_star, tau)
 
     R = similar!(tridiag.R, Phi)
     B = similar!(tridiag.B, Phi)
-    @with mgr let (irange, jrange, lrange) = axes(Phi)
+    #=@with mgr=# let (irange, jrange, lrange) = axes(Phi)
         Nz = size(m,3)
         @inbounds for j in jrange, l in lrange
-            @vec for i in irange
+            #=@vec=# for i in irange
                 if l == 1
                     Jp_up = Jp[i,j,l] 
                     Jp_down = J * (pb[i,j] - rhob * (Phi[i,j,1] - Phis[i,j]) ) 

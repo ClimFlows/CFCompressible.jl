@@ -3,8 +3,9 @@ module NH_state
 using CFHydrostatics
 using ..CFCompressible: FCE
 
-using SHTnsSpheres: analysis_scalar!, analysis_vector!, erase, void
-using ManagedLoops: @with, @vec
+using SHTnsSpheres: SHTnsSphere, analysis_scalar!, analysis_vector!, erase, void
+using CFDomains: VoronoiSphere, Stencils
+using ManagedLoops: @with, @vec, @unroll
 
 """
     diags_HPE = CFHydrostatics.diagnostics(model_HPE)
@@ -13,9 +14,10 @@ using ManagedLoops: @with, @vec
 
     Diagnose fully-compressible degrees of freedom from `state_HPE`, containing hydrostatic degrees of freedom.
 """
-function diagnose(model::FCE, diags, state)
-    # diags = CFHydrostatics.diagnostics(model_HPE)
-    (; mgr, domain, planet) = model
+diagnose(model::FCE, diags, state) = diagnose_FCE(model, model.domain.layer, diags, state)
+
+function diagnose_FCE(model, sph::SHTnsSphere, diags, state)
+    (; mgr, planet) = model
     (; radius, gravity) = planet
     rad2, invrad, gm2 = radius^2, inv(radius), gravity^-2
 
@@ -77,12 +79,23 @@ function diagnose(model::FCE, diags, state)
         end # j in jrange
     end # @with
 
-    sph = domain.layer
     (; mass_air_spec, mass_consvar_spec) = state
     uv_spec = analysis_vector!(void, erase((ucolat=ux, ulon=uy)), sph)
     W_spec = analysis_scalar!(void, erase(W), sph)
     Phi_spec = analysis_scalar!(void, erase(session.geopotential), sph)
     return (; mass_air_spec=mass_air_spec/gravity, mass_consvar_spec=mass_consvar_spec/gravity, uv_spec, Phi_spec, W_spec)
+end
+
+function diagnose_FCE(model, sph::VoronoiSphere, diags, state)
+    (; gravity) = model.planet
+    # NB : in HPE, `masses` are multiplied by gravity but not in FCE => divide by gravity
+    session = open(diags; model, state)
+    mass_air = state.mass_air / gravity
+    mass_consvar = state.mass_consvar / gravity
+    Phi = session.geopotential_i
+    ucov = copy(state.ucov)
+    W = zero(Phi) # FIXME: use hydrostatic velocity
+    return (; mass_air, mass_consvar, ucov, Phi, W)
 end
 
 end # module

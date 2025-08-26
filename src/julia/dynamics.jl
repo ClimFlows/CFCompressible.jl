@@ -11,6 +11,8 @@ using ..CFCompressible: FCE
 import ..CFCompressible: FCE_tendencies!
 using ..CFCompressible.VerticalDynamics: VerticalEnergy, batched_bwd_Euler!, ref_bwd_Euler!
 
+using ..ZeroArrays: ZeroArray
+
 #= Units
 [m] = kg
 [w] = s             w = g⁻²̇Φ
@@ -323,26 +325,5 @@ end
 
 vector_spec(spheroidal, toroidal) = (; spheroidal, toroidal)
 vector_spat(ucolat, ulon) = (; ucolat, ulon)
-
-struct Zero <: Real end
-
-struct ZeroArray{N} <: AbstractArray{Zero,N}
-    ax::NTuple{N, Base.OneTo{Int}}
-end
-ZeroArray(x::AbstractArray) = ZeroArray(axes(x))
-ZeroArray(x::NamedTuple) = map(ZeroArray, x)
-
-@inline Base.axes(z::ZeroArray) = z.ax
-@inline Base.getindex(::ZeroArray, i...) = Zero()
-
-@inline Base.:*(::Number, ::Zero) = Zero()
-@inline Base.:*(::Zero, ::Number) = Zero()
-@inline Base.:*(::Zero, ::Zero) = Zero()
-
-@inline Base.:+(x::Number, ::Zero) = x
-@inline Base.:+(::Zero, x::Number) = x
-@inline Base.:+(x::Complex, ::Zero) = x   # needed to disambiguate ::Number + ::Zero
-@inline Base.:+(::Zero, x::Complex) = x   # needed to disambiguate ::Zero + ::Number
-@inline Base.:+(::Zero, ::Zero) = Zero()
 
 end # module

@@ -6,42 +6,10 @@ using CFDomains: Stencils, VoronoiSphere, shell, VHLayout, transpose!
 using MutatingOrNot: MutatingOrNot, void, Void, similar! as sim!
 using ManagedLoops: @with, @vec, @unroll
 
-using ..CFCompressible: FCE
 import ..CFCompressible: FCE_tendencies!
 using ..CFCompressible.VerticalDynamics: VerticalEnergy, batched_bwd_Euler!, ref_bwd_Euler!
 
 using ..ZeroArrays: ZeroArray
-
-struct Lazy; end
-@inline Base.materialize!(::Lazy, rhs::Broadcast.Broadcasted) = BCArray(rhs)
-
-"""
-    z = @.. x*y
-
-    Constructs the lazy array-like `z` such that 
-        z[i, ...] == x[i, ...]*z[i, ...]
-"""
-macro (>)(expr)
-    lazy = Lazy()
-    return esc(:( @. $lazy = $expr ))
-end
-
-struct BCArray{T,N,B} <: AbstractArray{T,N}
-    bc::B
-end
-# @adapt_structure BCArray
-
-function BCArray(rhs::B) where {N, B<:Broadcast.Broadcasted{<:Broadcast.AbstractArrayStyle{N}}}
-    T = Base.Broadcast.combine_eltypes(rhs.f, rhs.args)
-    return BCArray{T,N,B}(rhs)
-end
-
-@inline Base.axes(x::BCArray) = axes(x.bc)
-@inline Base.size(x::BCArray) = size(x.bc)
-@inline Base.eltype(::BCArray{T}) where T = T
-@inline Base.similar(x::BCArray{T}) where T = similar(x.bc, T, size(x.bc))
-
-Base.@propagate_inbounds Base.getindex(x::BCArray, i...) = getindex(x.bc, i...)
 
 #= Units
 [m] = kg
@@ -62,14 +30,14 @@ Computation of tendencies is split into the following steps:
 5- new values for ucov
 6- slow tendencies for masses (mass budgets) and W, Phi (advection)
 7- slow tendencies for ucov (curl form)
-
 =#
 
 const State = NamedTuple{(:mass_air, :mass_consvar, :ucov, :Phi, :W)}
+const MaybeState = Union{Void, State}
 
 model_state(mass_air, mass_consvar, ucov, Phi, W) = (; mass_air, mass_consvar, ucov, Phi, W)
 
-function FCE_tendencies!(slow, fast, tmp, model, ::VoronoiSphere, state::State, tau)
+function FCE_tendencies!(slow::MaybeState, fast::MaybeState, tmp, model, ::VoronoiSphere, state::State, tau)
     # layout:
     #   (k,ij), better for horizontal stencils: state.X
     #   (ij,k), better for implicit step:       common.X

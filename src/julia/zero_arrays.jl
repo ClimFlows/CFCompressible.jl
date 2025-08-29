@@ -8,6 +8,7 @@ end
 ZeroArray(x::AbstractArray) = ZeroArray(axes(x))
 ZeroArray(x::NamedTuple) = map(ZeroArray, x)
 
+@inline Base.size(z::ZeroArray) = map(length, z.ax)
 @inline Base.axes(z::ZeroArray) = z.ax
 @inline Base.getindex(::ZeroArray, i...) = Zero()
 

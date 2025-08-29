@@ -1,9 +1,9 @@
- module VoronoiDynamics
+module VoronoiDynamics
 
 using CFPlanets: lonlat_from_cov
 using CFDomains: Stencils, VoronoiSphere, shell, VHLayout, transpose!
 
-using MutatingOrNot: MutatingOrNot, void, Void, similar!
+using MutatingOrNot: MutatingOrNot, void, Void, similar! as sim!
 using ManagedLoops: @with, @vec, @unroll
 
 using ..CFCompressible: FCE
@@ -58,48 +58,51 @@ Computation of tendencies is split into the following steps:
 1- Evaluate spatial inputs of HEVI solver: Phiₗ, Wₗ, mₖ, mₗ, sₖ
 2- HEVI solver => new spatial values of W, Phi
 3- fast tendencies for W, Phi
-4- fast tendencies fur u,v
-5- new spectral values for u,v
-6- slow spectral tendencies for masses (mass budgets) and W, Phi (advection)
-7- slow spectral tendencies for u,v (curl form)
+4- fast tendencies for ucov
+5- new values for ucov
+6- slow tendencies for masses (mass budgets) and W, Phi (advection)
+7- slow tendencies for ucov (curl form)
 
-Each step has its own additional scratch space for intermediate fields.
-In addition, there is shared scratch space for (Phiₗ, Wₗ, mₖ, Sₖ, mₗ, sₖ)
 =#
 
 const State = NamedTuple{(:mass_air, :mass_consvar, :ucov, :Phi, :W)}
 
 model_state(mass_air, mass_consvar, ucov, Phi, W) = (; mass_air, mass_consvar, ucov, Phi, W)
 
-function FCE_tendencies!(slow, fast, scratch, model, sph::VoronoiSphere, state::State, tau)
+function FCE_tendencies!(slow, fast, tmp, model, ::VoronoiSphere, state::State, tau)
     # layout:
     #   (k,ij), better for horizontal stencils: state.X
     #   (ij,k), better for implicit step:       common.X
-    common = spatial_fields!(scratch.common, model, state) # mk, Sk, Phil, ps, sk, ml
+    common = spatial_fields!(tmp.common, model, state) # mk, Sk, Phil, ps, sk, ml
 
     new_Phil, new_Wl, tridiag = batched_bwd_Euler!(model, common.ps,
                                                    (common.mk, common.ml, common.Sk,
                                                     common.Phil, common.Wl), tau)
-    dPhil, dWl, fast_HV = fast_tendencies_PhiW!(scratch.dPhil, scratch.dWl,
-                                                          scratch.fast_HV, model,
+    dPhil, dWl, fast_HV = fast_tendencies_PhiW!(tmp.dPhil, tmp.dWl,
+                                                          tmp.fast_HV, model,
                                                           common, new_Phil,
                                                           new_Wl)
-    Phil = transpose!(scratch.Phil, model.mgr, new_Phil)
-    Wl = transpose!(scratch.Wl, model.mgr, new_Wl)
-    fast_dPhil = transpose!(fast.Phil, model.mgr, dPhil)
-    fast_dWl = transpose!(fast.Wl, model.mgr, dWl)
+    Phil = transpose!(tmp.Phil, model.mgr, new_Phil)
+    Wl = transpose!(tmp.Wl, model.mgr, new_Wl)
+    fast_dPhil = transpose!(fast.Phi, model.mgr, dPhil)
+    fast_dWl = transpose!(fast.W, model.mgr, dWl)
 
     # from now on we need to compute horizontal operators
     # this is best done in layout [k,ij] => transpose fields
-    fast_VH = fields_VH!(scratch.fast_VH, model.mgr, common, fast_HV)
+    fast_VH = fields_VH!(tmp.fast_VH, model.mgr, common, fast_HV)
 
-    fast_ducov, fast_ucov = fast_tendencies_ucov!(fast.ucov, scratch.fast_ucov, model, state.ucov,
-                                               fast_VH.sk, fast_VH.dHdm, fast_VH.dHdS)
+    fast_ducov = fast_tendencies_ucov!(fast.ucov, model, state.ucov,
+                                        fast_VH.sk, fast_VH.dHdm, fast_VH.dHdS)
     zero_mass = ZeroArray(state.mass_air)
-    fast = model_state(zero_mass, zero_mass, fast_ducov, fast_dPhil, fast_dWl) # air, consvar, uv, Phi, W
+    fast = model_state(zero_mass, zero_mass, fast_ducov, fast_dPhil, fast_dWl) # air, consvar, ucov, Phi, W
 
-    new_ucov = (@. scratch.new_ucov = state.ucov + tau*fast_ducov)
+    new_ucov = (@. tmp.new_ucov = state.ucov + tau*fast_ducov)
     new_state = (; mk=state.mass_air, sk=fast_VH.sk, invml=fast_VH.invml, ucov=new_ucov, Phil, Wl) # masses are unchanged
+
+    # steps 6-7
+    slow, tmp_slow = slow!(slow, tmp.tmp_slow, model, new_state)
+    tmp_ = (; common, new_Phil, new_Wl, tridiag, dPhil, dWl, fast_HV, Phil, Wl, fast_dPhil, fast_dWl, fast_VH, new_ucov, tmp_slow)
+    return slow, fast, tmp_
 
     let # debug
         @info "common" map(size, common)
@@ -110,49 +113,24 @@ function FCE_tendencies!(slow, fast, scratch, model, sph::VoronoiSphere, state::
         @info "new_state" map(size, new_state)
     end
 
-    # step 6
-    (dmass_air, dmass_consvar, dW, dPhi), slow_mass = mass_budgets!(slow,
-                                                                    scratch.slow_mass,
-                                                                    model,
-                                                                    new_state)
-    # step 7
-    duv_spec, slow_curl_form = curl_form!(slow.uv_spec, scratch.slow_curl_form, model.fcov,
-                                          sph, new_state, slow_mass.fluxes, common.mk)
-
-    #= let # debug
-        fluxes = slow_mass.fluxes
-        # @info "slow" extrema(fluxes.dPhi)
-        fliplat(x) = reverse(x; dims=1)
-        Linf(x) = maximum(abs,x)
-        sym(x, op) = Linf(op(x,fliplat(x)))/Linf(x)
-        (; uv, grad_Phi, fluxes) = slow_mass
-        @info "symmetry" sym(model.Phis,-) sym(fluxes.B, -) sym(fluxes.dPhi, -) sym(fluxes.Uyk, -) sym(fluxes.wUy,-) sym(fluxes.sUy, -) sym(fast_uv.fy, -) sym(uv.ulon, -) sym(grad_Phi.ulon, -) sym(common.mk, -)  sym(common.ml, -) sym(common.Wl, -)
-        @info "antisymmetry" sym(fluxes.Uxk, +) sym(fluxes.wUx, +) sym(fluxes.sUx, +) sym(fast_uv.fx, +) sym(uv.ucolat, +) sym(grad_Phi.ucolat, +)
-    end =#
-
-    # Done
-    slow = model_state(dmass_air_spec, dmass_consvar_spec, duv_spec, dPhi_spec, dW_spec) # air, consvar, uv, Phi, W
-    scratch = (; common, fast_spat, fast_uv, slow_mass, slow_curl_form, Phil_new, Wl_new,
-               spheroidal, toroidal)
-    return slow, fast, scratch
 end
 
-function spatial_fields!(scratch, model, state)
+function spatial_fields!(tmp, model, state)
     (; vcoord, planet, mgr) = model
     ptop, inv_Jac = vcoord.ptop, planet.gravity/planet.radius^2
 
     # state fields are in (k, ij) layout
-    mk = transpose!(scratch.mk, mgr, state.mass_air)
-    Sk = transpose!(scratch.Sk, mgr, state.mass_consvar)
-    Phil = transpose!(scratch.Phil, mgr, state.Phi)
-    Wl = transpose!(scratch.Wl, mgr, state.W)
+    mk = transpose!(tmp.mk, mgr, state.mass_air)
+    Sk = transpose!(tmp.Sk, mgr, state.mass_consvar)
+    Phil = transpose!(tmp.Phil, mgr, state.Phi)
+    Wl = transpose!(tmp.Wl, mgr, state.W)
 
     # now work in (ij, k) layout
-    ps = similar!(scratch.ps, @view mk[:, 1])
-    sk = similar!(scratch.sk, Sk)
-    ml = similar!(scratch.ml, Phil)
+    ps = sim!(tmp.ps, @view mk[:, 1])
+    sk = sim!(tmp.sk, Sk)
+    ml = sim!(tmp.ml, Phil)
 
-    @with model.mgr let ijrange = axes(mk, 1)
+    @with mgr let ijrange = axes(mk, 1)
         Nz = size(mk, 2)
         for l in 1:(Nz + 1)
             for ij in ijrange
@@ -176,16 +154,15 @@ function spatial_fields!(scratch, model, state)
             end
         end
     end # @with
-    @info "spatial_fields!" extrema(inv_Jac*mk) extrema(ps) extrema(sum(state.mass_air; dims=1)*inv_Jac) extrema(sum(mk; dims=2)*inv_Jac)
 
     return (; mk, Sk, Phil, Wl, sk, ml, ps)
 end
 
-function fields_VH!(scratch, mgr, common, fast_spat)
-    sk = transpose!(scratch.sk, mgr, common.sk)
-    dHdm = transpose!(scratch.dHdm, mgr, fast_spat.dHdm)
-    dHdS = transpose!(scratch.dHdS, mgr, fast_spat.dHdS)
-    invml = transpose!(scratch.invml, mgr, common.ml)
+function fields_VH!(tmp, mgr, common, fast_spat)
+    sk = transpose!(tmp.sk, mgr, common.sk)
+    dHdm = transpose!(tmp.dHdm, mgr, fast_spat.dHdm)
+    dHdS = transpose!(tmp.dHdS, mgr, fast_spat.dHdS)
+    invml = transpose!(tmp.invml, mgr, common.ml)
     @. invml = inv(invml)
     return (; sk, invml, dHdm, dHdS)
 end
@@ -194,17 +171,17 @@ end
 
 zero!(x) = @. x=0
 
-function fast_tendencies_PhiW!(dPhil, dWl, scratch, model, common, Phil, Wl)
+function fast_tendencies_PhiW!(dPhil_, dWl_, tmp, model, common, Phil, Wl)
     @assert axes(Wl) == axes(Phil)
     # layout is [ij,k]
     (; Phis, rhob) = model # bottom boundary condition p = ps - rhob*(Phi-Phis)
     (; vcoord, planet, gas) = model
     (; mk, sk, ml, ps) = common
 
-    dWl = similar!(scratch.dWl, Wl) # = -dHdPhi
-    dPhil = similar!(scratch.dPhil, Phil) # =+dHdW
-    dHdm = similar!(scratch.dHdm, mk)
-    dHdS = similar!(scratch.dHdS, sk)
+    dWl = sim!(dWl_, Wl) # = -dHdPhi
+    dPhil = sim!(dPhil_, Phil) # =+dHdW
+    dHdm = sim!(tmp.dHdm, mk)
+    dHdS = sim!(tmp.dHdS, sk)
 
     ptop, grav2, Jac = vcoord.ptop, planet.gravity^2, planet.radius^2/planet.gravity
 
@@ -250,9 +227,9 @@ function fast_tendencies_PhiW!(dPhil, dWl, scratch, model, common, Phil, Wl)
     return dPhil, Wl, (; dHdm, dHdS)
 end
 
-function fast_tendencies_ucov!(ducov_, scratch, model, ucov, consvar, B, exner)
+function fast_tendencies_ucov!(ducov_, model, ucov, consvar, B, exner)
     # layout is [k, ij]
-    ducov = similar!(ducov_, ucov)
+    ducov = sim!(ducov_, ucov)
     vsphere = model.domain.layer
 
     #=@with model.mgr, =#
@@ -270,10 +247,7 @@ end
 
 # ============= slow tendencies ================ #
 
-# vertical averaging requires (ij,k)
-# horizontal stencils (gradient) require (k, ij)
-
-function mass_budgets!(dstate, scratch, model, new_state)
+function slow!(dstate, tmp, model, new_state)
     # layout is [k,ij]
     (; mgr, planet) = model      # parameters
     factor = planet.radius^-2
@@ -281,21 +255,25 @@ function mass_budgets!(dstate, scratch, model, new_state)
     (; invml, mk, sk, ucov, Phil, Wl) = new_state # inputs
     Nz = size(mk, 1)
 
-    # vsphere_grad = merge(Stencils.gradient(vsphere), Stencils.average_ie(vsphere))
+    wl = wl!(sim!(tmp.wl, Wl), mgr, invml, Wl)
+    U_ke, sU_ke = sU_ke!(sim!(tmp.U_ke, ucov), sim!(tmp.sU_ke, ucov), mgr, vsphere, factor, wl, Phil, mk, ucov, sk)
+    U_le = U_le!(sim!(tmp.U_le, ucov, Nz+1, size(ucov,2)), mgr, U_ke)
+    wU, ∇Φ = wU_gradPhi!(sim!(tmp.wU, U_le), sim!(tmp.∇Φ, U_le), mgr, vsphere, wl, U_le, Phil)
 
-    wl = wl!(similar!(scratch.wl, Wl), mgr, invml, Wl)
-    U_ke, sU_ke = sU_ke!(similar!(scratch.U_ke, ucov), similar!(scratch.sU_ke, ucov), mgr, vsphere, factor, wl, Phil, mk, ucov, sk)
-    U_le = U_le!(similar!(scratch.U_le, ucov, Nz+1, size(ucov,2)), mgr, U_ke)
-    wU, ∇Φ = wU_gradPhi!(similar!(scratch.wU, U_le), similar!(scratch.∇Φ, U_le), mgr, vsphere, wl, U_le, Phil)
+    dPhi = dPhi_dt!(sim!(dstate.Phi, Phil), mgr, vsphere, invml, U_le, ∇Φ)
+    B = Bernoulli!(sim!(tmp.B, mk), mgr, vsphere, factor, mk, U_ke, wl, dPhi)
 
-    dPhi = dPhi_dt!(similar!(dstate.Phil, Phil), mgr, vsphere, invml, U_le, ∇Φ)
-    B = Bernoulli!(similar!(scratch.B, mk), mgr, vsphere, factor, mk, U_ke, wl, dPhi)
+    dmass_air = dmass!(sim!(dstate.mass_air, mk), mgr, vsphere, U_ke)
+    dmass_consvar = dmass!(sim!(dstate.mass_consvar, mk), mgr, vsphere, sU_ke)
+    dW = dmass!(sim!(dstate.W, Wl), mgr, vsphere, wU)
 
-    dmass = dmass!(similar!(dstate.mass, mk), mgr, vsphere, U_ke)
-    dmass_consvar = dmass!(similar!(dstate.mass_consvar, mk), mgr, vsphere, sU_ke)
-    dW = dmass!(similar!(dstate.Wl, Wl), mgr, vsphere, wU)
+    fcov = model.fcov
+    PV_v = PV_v!(sim!(tmp.PV_v, ucov, size(ucov,1), length(fcov)), mgr, vsphere, fcov, mk, ucov)
+    PV_e = PV_e!(sim!(tmp.PV_e, ucov), mgr, vsphere, PV_v)
+    ducov = curl_form!(sim!(dstate.ucov, ucov), mgr, vsphere, PV_e, U_ke, B)
 
-    return (dmass, dmass_consvar, dPhi, dW), (; U_ke, sU_ke, wl, U_le, wU, ∇Φ, B)
+    tmp = (; U_ke, sU_ke, wl, U_le, wU, ∇Φ, B, PV_v, PV_e)
+    return model_state(dmass_air, dmass_consvar, ducov, dPhi, dW), tmp        
 end
 
 function wl!(wl, mgr, invml, Wl)
@@ -359,15 +337,15 @@ function wU_gradPhi!(wU, ∇Φ, mgr, vsphere, wl, U_le, Phil)
 end
 
 function dPhi_dt!(dPhi, mgr, vsphere, invml, U_le, ∇Φ) # ∂ₜΦ = -u⋅∇Φ 
-    vsphere_dp = Stencils.dot_product(vsphere)
+    sph = Stencils.contraction(vsphere)
     degree = vsphere.primal_deg
     @with mgr let (lrange, cells) = axes(dPhi)
         for ij in cells
             deg = degree[ij]
             @unroll deg in 5:7 begin
-                dot_product = Stencils.dot_product(vsphere_dp, ij, Val(deg))
+                prod = Stencils.contraction(sph, ij, Val(deg))
                 @vec for l in lrange
-                    dPhi[l, ij] = -invml[l, ij] * dot_product(U_le, ∇Φ, l) # FIXME: no need for le_de
+                    dPhi[l, ij] = -invml[l, ij] * prod(U_le, ∇Φ, l)
                 end
             end
         end
@@ -376,15 +354,15 @@ function dPhi_dt!(dPhi, mgr, vsphere, invml, U_le, ∇Φ) # ∂ₜΦ = -u⋅∇�
 end
 
 function Bernoulli!(B, mgr, vsphere, factor, mk, U_ke, wl, dPhi) # Bernoulli function B = u⋅u/2 + (u⋅∇Φ)W/m
-    vsphere_dp = Stencils.dot_product(vsphere)
+    sph = Stencils.dot_product(vsphere)
     degree = vsphere.primal_deg
     @with mgr let (krange, cells) = axes(B)
         for ij in cells
             deg = degree[ij]
             @unroll deg in 5:7 begin
-                dot_product = Stencils.dot_product(vsphere_dp, ij, Val(deg))
+                prod = Stencils.dot_product(sph, ij, Val(deg))
                 @vec for k in krange 
-                    K = dot_product(U_ke, U_ke, k)/(2*factor*mk[k,ij]^2) # a^2 u⋅u/2
+                    K = prod(U_ke, U_ke, k)/(2*factor*mk[k,ij]^2) # a^2 u⋅u/2
                     B[k, ij] = K - (wl[k,ij]*dPhi[k,ij] + wl[k+1,ij]*dPhi[k+1,ij])/2
                 end
             end
@@ -401,12 +379,59 @@ function dmass!(dmass, mgr, vsphere, U) # ∂ₜm = -∇⋅U
             @unroll deg in 5:7 begin
                 dvg = Stencils.divergence(vsphere, ij, Val(deg))
                 @vec for k in krange
-                    dmass[k, ij] = -dvg(U,k) # FIXME: no need for le_de
+                    dmass[k, ij] = -dvg(U,k)
                 end
             end
         end
     end
     return dmass
+end
+
+function PV_v!(PV_v, mgr, vsphere, fcov, mass_air, ucov)
+    @with mgr let (krange, vertices) = axes(PV_v)
+        @inbounds for ij in vertices
+            curl = Stencils.curl(vsphere, ij)
+            avg = Stencils.average_iv(vsphere, ij) # area-weighted average from cells to vertices
+            Av = vsphere.Av[ij]    # unit sphere cell area
+            fcov_ij = fcov[ij]     # Coriolis * cell area Av
+            @vec for k in krange
+                zeta = curl(ucov, k)   # vorticity * Av
+                mv = Av * avg(mass_air, k)  # mass * Av
+                PV_v[k, ij] = (zeta + fcov_ij) * inv(mv)
+            end
+        end
+    end
+    return PV_v
+end
+
+function PV_e!(PV_e, mgr, vsphere, PV_v)
+    @with mgr let (krange, edges) = axes(PV_e)
+        @inbounds for ij in edges
+            avg = Stencils.average_ve(vsphere, ij) # centered averaging from vertices to edges
+            @vec for k in krange
+                PV_e[k, ij] = avg(PV_v, k)
+            end
+        end
+    end
+    return PV_e
+end
+
+function curl_form!(ducov, mgr, vsphere, PV_e, U, B)
+    @with mgr let (krange, edges) = axes(ducov)
+        @inbounds for ij in edges
+            grad = Stencils.gradient(vsphere, ij) # covariant gradient
+            avg = Stencils.average_ie(vsphere, ij) # centered average from cells to edges
+            deg = vsphere.trisk_deg[ij]
+            # @assert deg in 9:11 "deg=$deg not in 9:11"
+            @unroll deg in 9:11 begin
+                trisk = Stencils.TRiSK(vsphere, ij, Val(deg))
+                @vec for k in krange
+                    ducov[k, ij] = trisk(U, PV_e, k) - grad(B, k)
+                end
+            end
+        end
+    end
+    return ducov
 end
 
 end # module

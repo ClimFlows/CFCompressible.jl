@@ -229,12 +229,12 @@ function slow!(dstate, tmp, model, new_state)
 
     wl = wl!(sim!(tmp.wl, Wl), mgr, invml, Wl)
 
-    U_ke, sU_ke = sU_ke!(sim!(tmp.U_ke, ucov), sim!(tmp.sU_ke, ucov), mgr, vsphere, factor, wl, Phil, mk, ucov, sk)
+    u_ke, U_ke, sU_ke = sU_ke!(sim!(tmp.u_ke, ucov), sim!(tmp.U_ke, ucov), sim!(tmp.sU_ke, ucov), mgr, vsphere, factor, wl, Phil, mk, ucov, sk)
     U_le = U_le!(sim!(tmp.U_le, ucov, Nz+1, size(ucov,2)), mgr, U_ke)
     wU, ∇Φ = wU_gradPhi!(sim!(tmp.wU, U_le), sim!(tmp.∇Φ, U_le), mgr, vsphere, wl, U_le, Phil)
 
     dPhi = dPhi_dt!(sim!(dstate.Phi, Phil), mgr, vsphere, invml, U_le, ∇Φ)
-    B = Bernoulli!(sim!(tmp.B, mk), mgr, vsphere, factor, mk, U_ke, wl, dPhi)
+    B = Bernoulli!(sim!(tmp.B, mk), mgr, vsphere, factor, mk, u_ke, wl, dPhi)
 
     dmass_air = dmass!(sim!(dstate.mass_air, mk), mgr, vsphere, U_ke)
     dmass_consvar = dmass!(sim!(dstate.mass_consvar, mk), mgr, vsphere, sU_ke)
@@ -245,7 +245,7 @@ function slow!(dstate, tmp, model, new_state)
     PV_e = PV_e!(sim!(tmp.PV_e, ucov), mgr, vsphere, PV_v)
     ducov = curl_form!(sim!(dstate.ucov, ucov), mgr, vsphere, PV_e, U_ke, B)
 
-    tmp = (; U_ke, sU_ke, wl, U_le, wU, ∇Φ, B, PV_v, PV_e)
+    tmp = (; u_ke, U_ke, sU_ke, wl, U_le, wU, ∇Φ, B, PV_v, PV_e)
     return model_state(dmass_air, dmass_consvar, ducov, dPhi, dW), tmp        
 end
 
@@ -258,37 +258,38 @@ function wl!(wl, mgr, invml, Wl)
     return wl
 end
 
-function sU_ke!(U_ke, sU_ke, mgr, vsphere, factor, wl, Phil, mk, ucov, sk) # contravariant fluxes of mass and conservative variable
+function sU_ke!(u_ke, U_ke, sU_ke, mgr, vsphere, factor, wl, Phil, mk, ucov, sk) # contravariant fluxes of mass and conservative variable
     le_de = vsphere.le_de
     @with mgr let (krange, edges) = axes(U_ke)
-        for ij in edges
-            grad = Stencils.gradient(vsphere, ij) # covariant gradient
-            avg_ie = Stencils.average_ie(vsphere, ij) # centered average from cells to edges
-            cov_to_contra = factor*le_de[ij]
+        for edge in edges
+            grad = Stencils.gradient(vsphere, edge) # covariant gradient
+            avg_ie = Stencils.average_ie(vsphere, edge) # centered average from cells to edges
+            cov_to_contra = factor*le_de[edge]
             @vec for k in krange
                 w∇Φ = (avg_ie(wl, k)*grad(Phil, k) + avg_ie(wl, k+1)*grad(Phil, k+1))/2
-                U_ke[k, ij] = cov_to_contra*avg_ie(mk, k)*(ucov[k,ij]-w∇Φ)
-                sU_ke[k,ij] = avg_ie(sk, k) * U_ke[k, ij]
+                u_ke[k, edge] = cov_to_contra*(ucov[k,edge]-w∇Φ)
+                U_ke[k, edge] = avg_ie(mk, k) * u_ke[k, edge]
+                sU_ke[k,edge] = avg_ie(sk, k) * U_ke[k, edge]
             end
         end
     end
-    return U_ke, sU_ke
+    return u_ke, U_ke, sU_ke
 end
 
 function U_le!(U_le, mgr, U_ke) # contravariant mass flux at dual vertical cells
     Nz = size(U_ke, 1)
     # top and bottom interfaces
     @with mgr let edges = axes(U_le,2)
-        for ij in edges
-            U_le[1,ij] = U_ke[1, ij]/2
-            U_le[Nz+1,ij] = U_ke[Nz, ij]/2
+        for edge in edges
+            U_le[1,edge] = U_ke[1, edge]/2
+            U_le[Nz+1,edge] = U_ke[Nz, edge]/2
         end
     end
     # interior interfaces
     @with mgr let (lrange, edges) = (2:Nz, axes(U_le,2))
-        for ij in edges
+        for edge in edges
             @vec for l in lrange
-                U_le[l,ij] = (U_ke[l, ij]+U_ke[l-1,ij])/2
+                U_le[l,edge] = (U_ke[l, edge]+U_ke[l-1,edge])/2
             end
         end
     end
@@ -297,12 +298,12 @@ end
 
 function wU_gradPhi!(wU, ∇Φ, mgr, vsphere, wl, U_le, Phil)
     @with mgr let (lrange, edges) = axes(wU)
-        for ij in edges
-            avg_ie = Stencils.average_ie(vsphere, ij) # centered average from cells to edges
-            grad = Stencils.gradient(vsphere, ij) # covariant gradient
+        for edge in edges
+            avg_ie = Stencils.average_ie(vsphere, edge) # centered average from cells to edges
+            grad = Stencils.gradient(vsphere, edge) # covariant gradient
             @vec for l in lrange
-                wU[l,ij] = avg_ie(wl, l)*U_le[l,ij]
-                ∇Φ[l,ij] = grad(Phil, l)
+                wU[l,edge] = avg_ie(wl, l)*U_le[l,edge]
+                ∇Φ[l,edge] = grad(Phil, l)
             end
         end
     end
@@ -313,12 +314,12 @@ function dPhi_dt!(dPhi, mgr, vsphere, invml, U_le, ∇Φ) # ∂ₜΦ = -u⋅∇�
     sph = Stencils.contraction(vsphere)
     degree = vsphere.primal_deg
     @with mgr let (lrange, cells) = axes(dPhi)
-        for ij in cells
-            deg = degree[ij]
+        for cell in cells
+            deg = degree[cell]
             @unroll deg in 5:7 begin
-                prod = Stencils.contraction(sph, ij, Val(deg))
+                prod = Stencils.contraction(sph, cell, Val(deg))
                 @vec for l in lrange
-                    dPhi[l, ij] = -invml[l, ij] * prod(U_le, ∇Φ, l)
+                    dPhi[l, cell] = -invml[l, cell] * prod(U_le, ∇Φ, l)
                 end
             end
         end
@@ -326,17 +327,17 @@ function dPhi_dt!(dPhi, mgr, vsphere, invml, U_le, ∇Φ) # ∂ₜΦ = -u⋅∇�
     return dPhi
 end
 
-function Bernoulli!(B, mgr, vsphere, factor, mk, U_ke, wl, dPhi) # Bernoulli function B = u⋅u/2 + (u⋅∇Φ)W/m
+function Bernoulli!(B, mgr, vsphere, factor, mk, u_ke, wl, dPhi) # Bernoulli function B = u⋅u/2 + (u⋅∇Φ)W/m
     sph = Stencils.dot_prod_contra(vsphere)
     degree = vsphere.primal_deg
     @with mgr let (krange, cells) = axes(B)
-        for ij in cells
-            deg = degree[ij]
+        for cell in cells
+            deg = degree[cell]
             @unroll deg in 5:7 begin
-                prod = Stencils.dot_prod_contra(sph, ij, Val(deg))
+                prod = Stencils.dot_prod_contra(sph, cell, Val(deg))
                 @vec for k in krange 
-                    K = prod(U_ke, U_ke, k)/(2*factor*mk[k,ij]^2) # a^2 u⋅u/2
-                    B[k, ij] = K - (wl[k,ij]*dPhi[k,ij] + wl[k+1,ij]*dPhi[k+1,ij])/2
+                    K = prod(u_ke, u_ke, k)/(2*factor) # a^2 u⋅u/2
+                    B[k, cell] = K - (wl[k,cell]*dPhi[k,cell] + wl[k+1,cell]*dPhi[k+1,cell])/2
                 end
             end
         end
@@ -347,12 +348,12 @@ end
 function dmass!(dmass, mgr, vsphere, U) # ∂ₜm = -∇⋅U 
     degree = vsphere.primal_deg
     @with mgr let (krange, cells) = axes(dmass)
-        for ij in cells
-            deg = degree[ij]
+        for cell in cells
+            deg = degree[cell]
             @unroll deg in 5:7 begin
-                dvg = Stencils.divergence(vsphere, ij, Val(deg))
+                dvg = Stencils.divergence(vsphere, cell, Val(deg))
                 @vec for k in krange
-                    dmass[k, ij] = -dvg(U,k)
+                    dmass[k, cell] = -dvg(U,k)
                 end
             end
         end
@@ -362,15 +363,15 @@ end
 
 function PV_v!(PV_v, mgr, vsphere, fcov, mass_air, ucov)
     @with mgr let (krange, vertices) = axes(PV_v)
-        @inbounds for ij in vertices
-            curl = Stencils.curl(vsphere, ij)
-            avg = Stencils.average_iv(vsphere, ij) # area-weighted average from cells to vertices
-            Av = vsphere.Av[ij]    # unit sphere cell area
-            fcov_ij = fcov[ij]     # Coriolis * cell area Av
+        @inbounds for vertex in vertices
+            curl = Stencils.curl(vsphere, vertex)
+            avg = Stencils.average_iv(vsphere, vertex) # area-weighted average from cells to vertices
+            Av = vsphere.Av[vertex]    # unit sphere cell area
+            fcov_ij = fcov[vertex]     # Coriolis * cell area Av
             @vec for k in krange
                 zeta = curl(ucov, k)   # vorticity * Av
                 mv = Av * avg(mass_air, k)  # mass * Av
-                PV_v[k, ij] = (zeta + fcov_ij) * inv(mv)
+                PV_v[k, vertex] = (zeta + fcov_ij) * inv(mv)
             end
         end
     end
@@ -379,10 +380,10 @@ end
 
 function PV_e!(PV_e, mgr, vsphere, PV_v)
     @with mgr let (krange, edges) = axes(PV_e)
-        @inbounds for ij in edges
-            avg = Stencils.average_ve(vsphere, ij) # centered averaging from vertices to edges
+        @inbounds for edge in edges
+            avg = Stencils.average_ve(vsphere, edge) # centered averaging from vertices to edges
             @vec for k in krange
-                PV_e[k, ij] = avg(PV_v, k)
+                PV_e[k, edge] = avg(PV_v, k)
             end
         end
     end
@@ -391,15 +392,15 @@ end
 
 function curl_form!(ducov, mgr, vsphere, PV_e, U, B)
     @with mgr let (krange, edges) = axes(ducov)
-        @inbounds for ij in edges
-            grad = Stencils.gradient(vsphere, ij) # covariant gradient
-            avg = Stencils.average_ie(vsphere, ij) # centered average from cells to edges
-            deg = vsphere.trisk_deg[ij]
+        @inbounds for edge in edges
+            grad = Stencils.gradient(vsphere, edge) # covariant gradient
+            avg = Stencils.average_ie(vsphere, edge) # centered average from cells to edges
+            deg = vsphere.trisk_deg[edge]
             # @assert deg in 9:11 "deg=$deg not in 9:11"
             @unroll deg in 9:11 begin
-                trisk = Stencils.TRiSK(vsphere, ij, Val(deg))
+                trisk = Stencils.TRiSK(vsphere, edge, Val(deg))
                 @vec for k in krange
-                    ducov[k, ij] = trisk(U, PV_e, k) - grad(B, k)
+                    ducov[k, edge] = trisk(U, PV_e, k) - grad(B, k)
                 end
             end
         end

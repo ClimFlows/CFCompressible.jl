@@ -14,13 +14,12 @@ using ManagedLoops: @with, @vec, @unroll
 
     Diagnose fully-compressible degrees of freedom from `state_HPE`, containing hydrostatic degrees of freedom.
 """
-diagnose(model::FCE, diags, state) = diagnose_FCE(model, model.domain.layer, diags, state)
+diagnose(model::FCE, diags, state; wfactor=1) = diagnose_FCE(model, model.domain.layer, diags, state, wfactor)
 
-function diagnose_FCE(model, sph::SHTnsSphere, diags, state)
+function diagnose_FCE(model, sph::SHTnsSphere, diags, state, wfactor)
     (; mgr, planet) = model
     (; radius, gravity) = planet
-    factor = 1e4 # FIXME
-    rad2, invrad, gm2 = radius^2, inv(radius), factor*gravity^-2
+    rad2, invrad, gm2 = radius^2, inv(radius), wfactor*gravity^-2
 
     # NB : in HPE, `masses` are multiplied by gravity but not in FCE => divide by gravity
     session = open(diags; model, state)
@@ -29,7 +28,6 @@ function diagnose_FCE(model, sph::SHTnsSphere, diags, state)
     Phi_x, Phi_y = session.gradPhi_cov
     dPhi = session.dgeopotential
     W = similar(dPhi)
-
 
     @with mgr let (irange, jrange) = (axes(W, 1), axes(W, 2))
         krange = axes(ux, 3)
@@ -90,11 +88,10 @@ end
 
 shape(x,y) = (size(x,1), size(y,2))
 
-function diagnose_FCE(model, sph::VoronoiSphere, diags, state)
+function diagnose_FCE(model, sph::VoronoiSphere, diags, state, wfactor)
     (; mgr, planet) = model
     (; radius, gravity) = planet
-    factor = 1e4 # FIXME
-    gm2 = factor*gravity^-2
+    gm2 = wfactor*gravity^-2
     # in HPE, `masses` are multiplied by gravity but not in FCE => divide by gravity
     mass_air = state.mass_air / gravity
     mass_consvar = state.mass_consvar / gravity

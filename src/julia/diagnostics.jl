@@ -61,14 +61,6 @@ ulat(uv) = -uv.colat
 
 # FCE-specicific
 
-#=
-function uv(model, state) # FIXME: HPE version
-    (; ucolat, ulon) = synthesis_vector!(void, map(copy, state.uv_spec), model.domain.layer)
-    invrad = model.planet.radius^-1
-    return (ucolat=invrad * ucolat, ulon=invrad * ulon)
-end
-=#
-
 function uv(model, scratch)
     (; Uxk, Uyk) = scratch.slow_mass.fluxes
     m = scratch.common.mk

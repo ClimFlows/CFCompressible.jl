@@ -1,6 +1,7 @@
 module Dynamics
 
 using MutatingOrNot: MutatingOrNot, void, Void, similar!
+using CFDomains.ZeroArrays: zero_array
 using ManagedLoops: @with, @vec
 
 using SHTnsSpheres: SHTnsSpheres, SHTnsSphere, 
@@ -11,7 +12,6 @@ using ..CFCompressible: FCE
 import ..CFCompressible: FCE_tendencies!
 using ..CFCompressible.VerticalDynamics: VerticalEnergy, batched_bwd_Euler!, ref_bwd_Euler!
 
-using ..ZeroArrays: ZeroArray
 
 #= Units
 [m] = kg
@@ -71,7 +71,7 @@ function FCE_tendencies!(slow, fast, scratch, model, sph::SHTnsSphere, state::St
 
     # step 4
     duv_spec, fast_uv = fast_tendencies_uv!(fast.uv_spec, scratch.fast_uv, model, sph, common.sk, fast_spat.dHdm, fast_spat.dHdS)
-    zero_mass = ZeroArray(state.mass_air_spec)
+    zero_mass = zero_array(state.mass_air_spec)
     fast = model_state(zero_mass, zero_mass, duv_spec, dPhi_spec, dW_spec) # air, consvar, uv, Phi, W
 
     # step 5: update uv_spec ; keep Phil_new and Wl_new at grid points

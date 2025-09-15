@@ -2,6 +2,7 @@ module VoronoiDynamics
 
 using CFPlanets: lonlat_from_cov
 using CFDomains: Stencils, VoronoiSphere, shell, VHLayout, transpose!
+using CFDomains.ZeroArrays: zero_array
 
 using MutatingOrNot: MutatingOrNot, void, Void, similar! as sim!
 using ManagedLoops: @with, @vec, @unroll
@@ -9,7 +10,7 @@ using ManagedLoops: @with, @vec, @unroll
 import ..CFCompressible: FCE_tendencies!
 using ..CFCompressible.VerticalDynamics: VerticalEnergy, batched_bwd_Euler!, ref_bwd_Euler!
 
-using ..ZeroArrays: ZeroArray
+# using ..ZeroArrays: ZeroArray
 
 #= Units
 [m] = kg
@@ -61,7 +62,7 @@ function FCE_tendencies!(slow::MaybeState, fast::MaybeState, tmp, model, ::Voron
 
     fast_ducov = fast_tendencies_ucov!(fast.ucov, model, state.ucov,
                                         fast_VH.sk, fast_VH.dHdm, fast_VH.dHdS)
-    zero_mass = ZeroArray(state.mass_air)
+    zero_mass = zero_array(state.mass_air)
     fast = model_state(zero_mass, zero_mass, fast_ducov, fast_dPhil, fast_dWl) # air, consvar, ucov, Phi, W
 
     new_ucov = (@. tmp.new_ucov = state.ucov + tau*fast_ducov)

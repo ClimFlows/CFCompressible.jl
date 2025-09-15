@@ -339,21 +339,21 @@ function batched_bwd_Euler!(model, ps, state, tau, check=false)
     ptop, gravity, Jac = vcoord.ptop, planet.gravity, planet.radius^2/planet.gravity
     H = VerticalEnergy(gas, gravity, Jac, ptop, Phis, ps, rhob)
 
-    (mk, ml, Sk, Phi_star, W_star) = state
-    Wl, Phil, DPhil, dPhil = copy(W_star), copy(Phi_star), zero(Phi_star), similar(Phi_star)
+    (mk, ml, Sk, Phi_old, W_old) = state
+    Phil, DPhil, dPhil = copy(Phi_old), zero(Phi_old), similar(Phi_old)
 
-    tridiag = batched_Newton_iteration(void, mgr, H, mk, Sk, Phi_star, W_star, Phil, DPhil, dPhil, tau, 1, flip_solve, check)
+    tridiag = batched_Newton_iteration(void, mgr, H, mk, Sk, Phi_old, W_old, Phil, DPhil, dPhil, tau, 1, flip_solve, check)
 
     if tau>0
         for iter in 2:niter
-            batched_Newton_iteration(tridiag, mgr, H, mk, Sk, Phi_star, W_star, Phil, DPhil, dPhil, tau, iter, flip_solve, check)
+            batched_Newton_iteration(tridiag, mgr, H, mk, Sk, Phi_old, W_old, Phil, DPhil, dPhil, tau, iter, flip_solve, check)
         end
-        verbose && @info "Batched update after $niter Newton iterations" extrema(Phi_star) extrema(DPhil) extrema(dPhil)
+        verbose && @info "Batched update after $niter Newton iterations" extrema(Phi_old) extrema(DPhil) extrema(dPhil)
         # update W
         inv_tau_g2 = inv(tau * gravity^2)
         Wl = @. inv_tau_g2 * ml * DPhil
     else
-        Wl = copy(W_star)
+        Wl = copy(W_old)
     end
     return Phil, Wl, tridiag
 end

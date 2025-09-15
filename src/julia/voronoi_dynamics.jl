@@ -192,7 +192,10 @@ function fast_tendencies_PhiW!(dPhil_, dWl_, tmp, model, common, Phil, Wl)
         end
     end # @with
 
-    return dPhil, Wl, (; dHdm, dHdS)
+    # @. dPhil = grav2*(Wl/ml) # FIXME
+    # @info "fast_tendencies_PhiW!" maximum(abs, dWl)/maximum(abs,Wl)
+
+    return dPhil, dWl, (; dHdm, dHdS)
 end
 
 function fast_tendencies_ucov!(ducov_, model, ucov, consvar, B, exner)
@@ -224,6 +227,7 @@ function slow!(dstate, tmp, model, new_state)
     Nz = size(mk, 1)
 
     wl = wl!(sim!(tmp.wl, Wl), mgr, invml, Wl)
+
     U_ke, sU_ke = sU_ke!(sim!(tmp.U_ke, ucov), sim!(tmp.sU_ke, ucov), mgr, vsphere, factor, wl, Phil, mk, ucov, sk)
     U_le = U_le!(sim!(tmp.U_le, ucov, Nz+1, size(ucov,2)), mgr, U_ke)
     wU, ∇Φ = wU_gradPhi!(sim!(tmp.wU, U_le), sim!(tmp.∇Φ, U_le), mgr, vsphere, wl, U_le, Phil)
@@ -322,13 +326,13 @@ function dPhi_dt!(dPhi, mgr, vsphere, invml, U_le, ∇Φ) # ∂ₜΦ = -u⋅∇�
 end
 
 function Bernoulli!(B, mgr, vsphere, factor, mk, U_ke, wl, dPhi) # Bernoulli function B = u⋅u/2 + (u⋅∇Φ)W/m
-    sph = Stencils.dot_product(vsphere)
+    sph = Stencils.dot_prod_contra(vsphere)
     degree = vsphere.primal_deg
     @with mgr let (krange, cells) = axes(B)
         for ij in cells
             deg = degree[ij]
             @unroll deg in 5:7 begin
-                prod = Stencils.dot_product(sph, ij, Val(deg))
+                prod = Stencils.dot_prod_contra(sph, ij, Val(deg))
                 @vec for k in krange 
                     K = prod(U_ke, U_ke, k)/(2*factor*mk[k,ij]^2) # a^2 u⋅u/2
                     B[k, ij] = K - (wl[k,ij]*dPhi[k,ij] + wl[k+1,ij]*dPhi[k+1,ij])/2

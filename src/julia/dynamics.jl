@@ -97,7 +97,7 @@ function FCE_tendencies!(slow, fast, scratch, model, sph::SHTnsSphere, state::St
 
     # Done
     slow = model_state(dmass_air_spec, dmass_consvar_spec, duv_spec, dPhi_spec, dW_spec) # air, consvar, uv, Phi, W
-    scratch = (; common, fast_spat, fast_uv, slow_mass, slow_curl_form, Phil_new, Wl_new, spheroidal, toroidal)
+    scratch = (; common, tridiag, fast_spat, fast_uv, slow_mass, slow_curl_form, Phil_new, Wl_new, spheroidal, toroidal)
     return slow, fast, scratch
 end
 

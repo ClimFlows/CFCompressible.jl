@@ -42,9 +42,16 @@ function FCE_tendencies!(slow::MaybeState, fast::MaybeState, tmp, model, ::Voron
     # layout:
     #   (k,ij), better for horizontal stencils: state.X
     #   (ij,k), better for implicit step:       common.X
+
+    # @info "FCE_tendencies!" extrema(state.mass_air[end,:])
+    # if !all(x->(x>0), state.mass_air)
+    #     @error "negative air mass found!" findall(x->(x<0), state.mass_air)
+    #     @assert all(x->(x>0), state.mass_air) 
+    # end
     common = spatial_fields!(tmp.common, model, state) # mk, Sk, Phil, ps, sk, ml
 
-    new_Phil, new_Wl, tridiag = batched_bwd_Euler!(model, common.ps,
+    new_Phil, new_Wl, tridiag = batched_bwd_Euler!(tmp.new_Phil, tmp.new_Wl, tmp.tridiag,
+                                                   model, common.ps,
                                                    (common.mk, common.ml, common.Sk,
                                                     common.Phil, common.Wl), tau)
     dPhil, dWl, fast_HV = fast_tendencies_PhiW!(tmp.dPhil, tmp.dWl,

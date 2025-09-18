@@ -334,16 +334,27 @@ end
 #================== 3D backward Euler step ================#
 
 function batched_bwd_Euler!(model, ps, state, tau, check=false)
+    return batched_bwd_Euler!(void, void, void, model, ps, state, tau, check)
+end
+
+function batched_bwd_Euler!(Phil_, Wl_, tridiag_, model, ps, state, tau, check=false)
     (; mgr, newton, vcoord, planet, gas, Phis, rhob) = model
     (; niter, flip_solve, verbose) = newton
     ptop, gravity, Jac = vcoord.ptop, planet.gravity, planet.radius^2/planet.gravity
     H = VerticalEnergy(gas, gravity, Jac, ptop, Phis, ps, rhob)
 
     (mk, ml, Sk, Phi_old, W_old) = state
-    Phil, DPhil, dPhil = copy(Phi_old), zero(Phi_old), similar(Phi_old)
 
-    tridiag = batched_Newton_iteration(void, mgr, H, mk, Sk, Phi_old, W_old, Phil, DPhil, dPhil, tau, 1, flip_solve, check)
+    # Phil, DPhil, dPhil = copy(Phi_old), zero(Phi_old), similar(Phi_old)
+    Phil = similar!(Phil_, Phi_old)
+    DPhil = similar!(tridiag_.DPhil, Phi_old)
+    dPhil = similar!(tridiag_.dPhil, Phi_old)
+    @. Phil = Phi_old
+    @. DPhil = 0
+        
+    tridiag = batched_Newton_iteration(tridiag_, mgr, H, mk, Sk, Phi_old, W_old, Phil, DPhil, dPhil, tau, 1, flip_solve, check)
 
+    Wl = similar!(Wl_, W_old)
     if tau>0
         for iter in 2:niter
             batched_Newton_iteration(tridiag, mgr, H, mk, Sk, Phi_old, W_old, Phil, DPhil, dPhil, tau, iter, flip_solve, check)
@@ -351,11 +362,11 @@ function batched_bwd_Euler!(model, ps, state, tau, check=false)
         verbose && @info "Batched update after $niter Newton iterations" extrema(Phi_old) extrema(DPhil) extrema(dPhil)
         # update W
         inv_tau_g2 = inv(tau * gravity^2)
-        Wl = @. inv_tau_g2 * ml * DPhil
+        @. Wl = inv_tau_g2 * ml * DPhil
     else
-        Wl = copy(W_old)
+        @. Wl = W_old
     end
-    return Phil, Wl, tridiag
+    return Phil, Wl, merge(tridiag, (; DPhil, dPhil))
 end
 
 function batched_Newton_iteration(tridiag_, mgr, H, mk::M, Sk::M, Phi_star::M, W_star::M, Phil::M, DPhil::M, dPhil::M, tau, iter, flip_solve, check) where { M<:AbstractMatrix}
@@ -364,12 +375,15 @@ function batched_Newton_iteration(tridiag_, mgr, H, mk::M, Sk::M, Phi_star::M, W
     return batched_Newton_iteration(tridiag_, mgr, H, map(reshp, (mk, Sk, Phi_star, W_star, Phil, DPhil, dPhil))..., tau, iter, flip_solve, check)
 end
 
-function batched_Newton_iteration(tridiag_, mgr, H, mk, Sk, Phi_star, W_star, Phil, DPhil, dPhil, tau, iter, flip_solve, check)
+function batched_Newton_iteration(tmp, mgr, H, mk, Sk, Phi_star, W_star, Phil, DPhil, dPhil, tau, iter, flip_solve, check)
     @. Phil = Phi_star + DPhil
-    (; R, A, B) = tri = batched_tridiag_problem!(tridiag_, mgr, H, (mk, Sk, Phil), Phi_star, W_star, tau)
-    Solvers.Thomas!(dPhil, A, B, R, flip_solve)
+    (; R, A, B) = tri = batched_tridiag_problem!(tmp, mgr, H, (mk, Sk, Phil), Phi_star, W_star, tau)
+    C, D = similar!(tmp.C, A), similar!(tmp.D, B)
+    Solvers.Thomas!(dPhil, C, D, A, B, R, flip_solve)
     @. DPhil += dPhil
 
+    # @info "batched_Newton_iteration" extrema(DPhil[:,:,end]) extrema(dPhil[:,:,end])
+    
     # verify batched_tridiag_problem! and batched_Thomas
     check && for i in axes(mk,1), j in axes(mk,2)
         H_ij = VerticalEnergy(gas, gravity, Jac, ptop, Phis[i,j], ps[i,j], rhob)
@@ -393,7 +407,7 @@ function batched_Newton_iteration(tridiag_, mgr, H, mk, Sk, Phi_star, W_star, Ph
         end
     end
 
-    return tri
+    return merge(tri, (; C, D))
 end
 
 #=
@@ -416,6 +430,7 @@ function batched_tridiag_problem!(tridiag, mgr, H, state, Phi_star, W_star, tau)
                 invm = inv(m[i,j,k])
                 consvar = invm * S[i,j,k] 
                 vol = J * invm * (Phi[i,j,k + 1] - Phi[i,j,k])
+                @assert vol>0
                 p = @inline gas(:v, :consvar).pressure(vol, consvar)
                 Jp[i,j,k] = J * p
                 # off-diagonal coeffcient A[k]

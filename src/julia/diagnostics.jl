@@ -87,7 +87,6 @@ end
 surface_pressure(scratch) = scratch.common.ps
 
 function pressure(model, specific_volume, conservative_variable)
-    @info "pressure" size(specific_volume) size(conservative_variable)
     return model.gas(:v, :consvar).pressure.(specific_volume, conservative_variable)
 end
 

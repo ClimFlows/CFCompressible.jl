@@ -20,14 +20,16 @@ function diagnostics()
     return CookBook(;
                     # used for dispatch
                     sphere,
+                    # independent from vertical coordinate, native grid
+                    temperature_i,
                     # independent from vertical coordinate
                     uv, ulon, ulat,
+                    temperature,
                     specific_volume,
                     pressure,
                     surface_pressure,
                     hydrostatic_pressure,
                     NH_pressure,
-                    temperature,
                     sound_speed,
                     # depend on vertical coordinate
                     masses,
@@ -42,15 +44,19 @@ end
 
 sphere(model) = model.domain.layer
 
+# native -> lonlat
+
+temperature(to_lonlat, temperature_i) = to_lonlat(temperature_i)
+
 # same as HPE
 
 slow_mass_air(model, slow) = synthesis_scalar!(void, slow.mass_air_spec, model.domain.layer)
 
-function sound_speed(model, pressure, temperature)
-    return model.gas(:p, :T).sound_speed.(pressure, temperature)
+function sound_speed(model, pressure, temperature_i)
+    return model.gas(:p, :T).sound_speed.(pressure, temperature_i)
 end
 
-function temperature(model, pressure, conservative_variable)
+function temperature_i(model, pressure, conservative_variable)
      return model.gas(:p, :consvar).temperature.(pressure, conservative_variable)
 end
 

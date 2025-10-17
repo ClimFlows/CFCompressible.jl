@@ -384,7 +384,7 @@ function batched_Newton_iteration(tmp, mgr, H, mk, Sk, Phi_star, W_star, Phil, D
     Solvers.Thomas!(dPhil, C, D, A, B, R, flip_solve)
     @. DPhil += dPhil
 
-    @info "batched_Newton_iteration" extrema(DPhil[:,:,end]) extrema(dPhil[:,:,end])
+    # @info "batched_Newton_iteration" extrema(DPhil[:,:,end]) extrema(dPhil[:,:,end])
     
     # verify batched_tridiag_problem! and batched_Thomas
     check && for i in axes(mk,1), j in axes(mk,2)
@@ -416,7 +416,7 @@ end
 function hydrostatic_geopotential!(H, m::M, S::M, Phi::M) where {M<:AbstractMatrix}
     (; Phis, ptop, pb, J, ptop, gas) = H  # Phis and pb are 1D arrays
     sizes = map(size, (; m, S, Phi, pb, Phis))
-    @info "hydrostatic_geopotential!" sizes
+    # @info "hydrostatic_geopotential!" sizes
 
     inv_J = inv(J)
     #=@with mgr =# let irange = axes(Phi, 1)
@@ -437,7 +437,7 @@ function hydrostatic_geopotential!(H, m::M, S::M, Phi::M) where {M<:AbstractMatr
             end
         end
     end
-    @info "hydrostatic_geopotential!" extrema(Phi[:,2]-Phi[:,1]) extrema(Phi[:,1]-Phis[:])
+    # @info "hydrostatic_geopotential!" extrema(Phi[:,2]-Phi[:,1]) extrema(Phi[:,1]-Phis[:])
 end
 
 const Array3D{T} = AbstractArray{T,3}
@@ -445,7 +445,7 @@ const Array3D{T} = AbstractArray{T,3}
 function hydrostatic_geopotential!(H, m::A, S::A, Phi::A) where {A<:Array3D}
     (; Phis, ptop, pb, J, ptop, gas) = H  # Phis and pb are 1D arrays
     sizes = map(size, (; m, S, Phi, pb, Phis))
-    @info "hydrostatic_geopotential" sizes
+    # @info "hydrostatic_geopotential" sizes
 
     inv_J = inv(J)
     #=@with mgr =# let (irange, jrange) = (axes(Phi, 1), axes(Phi,2))
@@ -472,7 +472,7 @@ function batched_tridiag_problem!(tridiag, mgr, H, state, Phi_star, W_star, tau)
 
     Jp = similar!(tridiag.Jp, m)
     A = similar!(tridiag.A, m)
-    @info "batched_tridiag_problem" extrema(Phi[:,:,2]-Phi[:,:,1]) extrema(Phi[:,:,1]-Phis[:,:])
+    # @info "batched_tridiag_problem" extrema(Phi[:,:,2]-Phi[:,:,1]) extrema(Phi[:,:,1]-Phis[:,:])
 
     @with mgr let (irange, jrange, krange) = axes(m)
         @inbounds for j in jrange, k in krange

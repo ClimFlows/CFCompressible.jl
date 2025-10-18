@@ -14,7 +14,7 @@ MutatingOrNot = "6a37069a-9a67-4b2d-a34a-f09ab4b23c7c"
 SHTnsSpheres = "9e5c175a-5132-4517-85a1-2957ec255f89"
 
 [compat]
-CFBatchSolvers = "0.1.0"
+CFBatchSolvers = "0.1.1"
 CFDomains = "0.3.5"
 CFHydrostatics = "0.4.1"
 CFPlanets = "0.1.2"

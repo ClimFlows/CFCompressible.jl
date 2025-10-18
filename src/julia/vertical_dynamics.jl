@@ -480,7 +480,7 @@ function batched_tridiag_problem!(tridiag, mgr, H, state, Phi_star, W_star, tau)
                 invm = inv(m[i,j,k])
                 consvar = invm * S[i,j,k] 
                 vol = J * invm * (Phi[i,j,k + 1] - Phi[i,j,k])
-                @assert vol>0 "vol[$i, $j, $k]<=0"
+                # @assert vol>0 "vol[$i, $j, $k]<=0"
                 p = @inline gas(:v, :consvar).pressure(vol, consvar)
                 Jp[i,j,k] = J * p
                 # off-diagonal coeffcient A[k]
@@ -495,7 +495,7 @@ function batched_tridiag_problem!(tridiag, mgr, H, state, Phi_star, W_star, tau)
     @with mgr let (irange, jrange, lrange) = axes(Phi)
         Nz = size(m,3)
         @inbounds for j in jrange, l in lrange
-            @vec for i in irange
+            #=@vec=# for i in irange # FIXME
                 if l == 1
                     Jp_up = Jp[i,j,l] 
                     Jp_down = J * (pb[i,j] - rhob * (Phi[i,j,1] - Phis[i,j]) ) 

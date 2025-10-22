@@ -15,7 +15,7 @@ SHTnsSpheres = "9e5c175a-5132-4517-85a1-2957ec255f89"
 
 [compat]
 CFBatchSolvers = "0.1.1"
-CFDomains = "0.3.5"
+CFDomains = "0.3.7"
 CFHydrostatics = "0.4.1"
 CFPlanets = "0.1.2"
 CookBooks = "0.2.0"

@@ -25,6 +25,7 @@ jobs:
         version:
           - '1'
           - '1.10'
+          - '1.11'
         os:
           - ubuntu-latest
         arch:
@@ -68,6 +69,7 @@ jobs:
         shell: julia --project=docs --color=yes {0}
         run: |
           using Pkg
+          Pkg.Registry.add()
           Pkg.Registry.add(RegistrySpec(url = "https://github.com/ClimFlows/JuliaRegistry.git"))
           Pkg.develop(PackageSpec(path=pwd()))
           Pkg.instantiate()

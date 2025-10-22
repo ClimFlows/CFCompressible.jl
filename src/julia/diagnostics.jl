@@ -116,7 +116,7 @@ end
 
 NH_pressure(pressure, hydrostatic_pressure) = pressure - hydrostatic_pressure
 
-slow_fast_scratch(model, state) = FCE_tendencies!(void, void, void, model, model.domain.layer, state, 0.0)
+slow_fast_scratch(model, state) = FCE_tendencies!(void, void, void, model, model.domain.layer, state, 0)
 slow(slow_fast_scratch) = slow_fast_scratch[1]
 fast(slow_fast_scratch) = slow_fast_scratch[2]
 scratch(slow_fast_scratch) = slow_fast_scratch[3]

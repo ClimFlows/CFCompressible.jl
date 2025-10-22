@@ -1,7 +1,7 @@
 name = "CFCompressible"
 uuid = "a33e4613-43be-4f0e-b500-138f013d70af"
 authors = ["Thomas Dubos <thomas.dubos@polytechnique.edu>"]
-version = "0.1.0"
+version = "0.1.1"
 
 [deps]
 CFBatchSolvers = "4c829458-57b5-4508-983f-2f0f605f5bfa"

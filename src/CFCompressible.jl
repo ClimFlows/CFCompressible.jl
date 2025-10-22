@@ -47,7 +47,7 @@ slow, fast, scratch = tendencies!(slow, fast, scratch, model, state, t, tau)
 """
 tendencies!(slow, fast, scratch, model::FCE, state, _, tau) = FCE_tendencies!(slow, fast, scratch, model, model.domain.layer, state, tau)
 
-include("julia/lazy_broadcast.jl")
+# include("julia/lazy_broadcast.jl")
 
 include("julia/vertical_dynamics.jl")
 include("julia/horizontal_energies.jl")

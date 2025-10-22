@@ -3,8 +3,9 @@ module NH_state
 using CFHydrostatics
 using ..CFCompressible: FCE
 
-using SHTnsSpheres: analysis_scalar!, analysis_vector!, erase, void
-using ManagedLoops: @with, @vec
+using SHTnsSpheres: SHTnsSphere, analysis_scalar!, analysis_vector!, erase, void
+using CFDomains: VoronoiSphere, Stencils
+using ManagedLoops: @with, @vec, @unroll
 
 """
     diags_HPE = CFHydrostatics.diagnostics(model_HPE)
@@ -13,11 +14,12 @@ using ManagedLoops: @with, @vec
 
     Diagnose fully-compressible degrees of freedom from `state_HPE`, containing hydrostatic degrees of freedom.
 """
-function diagnose(model::FCE, diags, state)
-    # diags = CFHydrostatics.diagnostics(model_HPE)
-    (; mgr, domain, planet) = model
+diagnose(model::FCE, diags, state; wfactor=1) = diagnose_FCE(model, model.domain.layer, diags, state, wfactor)
+
+function diagnose_FCE(model, sph::SHTnsSphere, diags, state, wfactor)
+    (; mgr, planet) = model
     (; radius, gravity) = planet
-    rad2, invrad, gm2 = radius^2, inv(radius), gravity^-2
+    rad2, invrad, gm2 = radius^2, inv(radius), wfactor*gravity^-2
 
     # NB : in HPE, `masses` are multiplied by gravity but not in FCE => divide by gravity
     session = open(diags; model, state)
@@ -77,12 +79,57 @@ function diagnose(model::FCE, diags, state)
         end # j in jrange
     end # @with
 
-    sph = domain.layer
     (; mass_air_spec, mass_consvar_spec) = state
     uv_spec = analysis_vector!(void, erase((ucolat=ux, ulon=uy)), sph)
     W_spec = analysis_scalar!(void, erase(W), sph)
     Phi_spec = analysis_scalar!(void, erase(session.geopotential), sph)
     return (; mass_air_spec=mass_air_spec/gravity, mass_consvar_spec=mass_consvar_spec/gravity, uv_spec, Phi_spec, W_spec)
+end
+
+shape(x,y) = (size(x,1), size(y,2))
+
+function diagnose_FCE(model, sph::VoronoiSphere, diags, state, wfactor)
+    (; mgr, planet) = model
+    (; radius, gravity) = planet
+    gm2 = wfactor*gravity^-2
+    # in HPE, `masses` are multiplied by gravity but not in FCE => divide by gravity
+    mass_air = state.mass_air / gravity
+    mass_consvar = state.mass_consvar / gravity
+    ucov_HPE = state.ucov
+    ucov = similar(ucov_HPE)
+
+    session = open(diags; model, state)
+    Phi_dot = session.Phi_dot_il
+    gradPhi_el = session.gradPhi_el
+    Phi = session.geopotential_i
+    W = similar(Phi)
+    w∇Φ = similar(gradPhi_el)
+    
+    nz = length(axes(mass_air, 1))
+
+    @with mgr let cells = axes(W,2)
+        for cell in cells
+            W[1, cell] = gm2 * Phi_dot[1, cell] * mass_air[1, cell] / 2
+            for l in 2:nz
+                W[l, cell] = gm2 * Phi_dot[l, cell] * (mass_air[l-1, cell] + mass_air[l, cell]) / 2
+            end
+            W[nz+1, cell] = gm2 * Phi_dot[nz+1, cell] * mass_air[nz, cell] / 2
+        end
+    end
+
+    @with mgr let edges = axes(ucov,2)
+        for edge in edges
+            avg = Stencils.average_ie(sph, edge)
+            for l in axes(w∇Φ, 1)
+                w∇Φ[l, edge] = gm2*avg(Phi_dot, l)*gradPhi_el[l, edge]
+            end
+            for k in axes(ucov, 1)
+                ucov[k, edge] = ucov_HPE[k, edge] + (w∇Φ[k, edge] + w∇Φ[k+1, edge])/2
+            end
+        end
+    end
+
+    return (; mass_air, mass_consvar, ucov, Phi, W)
 end
 
 end # module

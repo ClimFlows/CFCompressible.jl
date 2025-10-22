@@ -2,7 +2,9 @@ module Diagnostics
 
 using MutatingOrNot: void, Void
 using CookBooks
+using CFDomains: VoronoiSphere
 using SHTnsSpheres:
+                    SHTnsSphere,
                     analysis_scalar!,
                     synthesis_scalar!,
                     analysis_vector!,
@@ -16,14 +18,18 @@ using ..CFCompressible.Dynamics: FCE_tendencies!
 
 function diagnostics()
     return CookBook(;
+                    # used for dispatch
+                    sphere,
+                    # independent from vertical coordinate, native grid
+                    temperature_i,
                     # independent from vertical coordinate
                     uv, ulon, ulat,
+                    temperature,
                     specific_volume,
                     pressure,
                     surface_pressure,
                     hydrostatic_pressure,
                     NH_pressure,
-                    temperature,
                     sound_speed,
                     # depend on vertical coordinate
                     masses,
@@ -36,15 +42,21 @@ end
 
 #=================== independent from vertical coordinate ==============#
 
+sphere(model) = model.domain.layer
+
+# native -> lonlat
+
+temperature(to_lonlat, temperature_i) = to_lonlat(temperature_i)
+
 # same as HPE
 
 slow_mass_air(model, slow) = synthesis_scalar!(void, slow.mass_air_spec, model.domain.layer)
 
-function sound_speed(model, pressure, temperature)
-    return model.gas(:p, :T).sound_speed.(pressure, temperature)
+function sound_speed(model, pressure, temperature_i)
+    return model.gas(:p, :T).sound_speed.(pressure, temperature_i)
 end
 
-function temperature(model, pressure, conservative_variable)
+function temperature_i(model, pressure, conservative_variable)
      return model.gas(:p, :consvar).temperature.(pressure, conservative_variable)
 end
 
@@ -55,14 +67,6 @@ ulat(uv) = -uv.colat
 
 # FCE-specicific
 
-#=
-function uv(model, state) # FIXME: HPE version
-    (; ucolat, ulon) = synthesis_vector!(void, map(copy, state.uv_spec), model.domain.layer)
-    invrad = model.planet.radius^-1
-    return (ucolat=invrad * ucolat, ulon=invrad * ulon)
-end
-=#
-
 function uv(model, scratch)
     (; Uxk, Uyk) = scratch.slow_mass.fluxes
     m = scratch.common.mk
@@ -70,7 +74,7 @@ function uv(model, scratch)
     return (ucolat=(@. radius*Uxk/m), ulon=(@. radius*Uyk/m))
 end
 
-function specific_volume(model, scratch)
+function specific_volume(sphere::SHTnsSphere, model, scratch)
     (; gravity, radius) = model.planet
     Jac = radius^2/gravity
     Phi, m = scratch.common.Phil, scratch.common.mk
@@ -78,10 +82,18 @@ function specific_volume(model, scratch)
     return @. Jac*dPhi/m
 end
 
+function specific_volume(sphere::VoronoiSphere, model, scratch)
+    (; gravity, radius) = model.planet
+    Jac = radius^2/gravity
+    Phi, m = scratch.common.Phil, scratch.common.mk
+    dPhi = Phi[:,2:end]-Phi[:,1:end-1]
+    return permutedims((@. Jac*dPhi/m), (2,1))
+end
+
 surface_pressure(scratch) = scratch.common.ps
 
 function pressure(model, specific_volume, conservative_variable)
-     return model.gas(:v, :consvar).pressure.(specific_volume, conservative_variable)
+    return model.gas(:v, :consvar).pressure.(specific_volume, conservative_variable)
 end
 
 function hydrostatic_pressure(model, masses)
@@ -104,7 +116,7 @@ end
 
 NH_pressure(pressure, hydrostatic_pressure) = pressure - hydrostatic_pressure
 
-slow_fast_scratch(model, state) = FCE_tendencies!(void, void, void, model, model.domain.layer, state, 0.0)
+slow_fast_scratch(model, state) = FCE_tendencies!(void, void, void, model, model.domain.layer, state, 0)
 slow(slow_fast_scratch) = slow_fast_scratch[1]
 fast(slow_fast_scratch) = slow_fast_scratch[2]
 scratch(slow_fast_scratch) = slow_fast_scratch[3]
@@ -115,10 +127,15 @@ Phi_dot(scratch) = scratch.fast_spat.dPhil
 
 # same as HPE
 
-function masses(model, state)
+function masses(sphere, model, state)
     fac, sph = model.planet.radius^-2, model.domain.layer
     return (air=synthesis_scalar!(void, fac * state.mass_air_spec, sph),
             consvar=synthesis_scalar!(void, fac * state.mass_consvar_spec, sph))
+end
+
+function masses(sphere::VoronoiSphere, model, state)
+    fac = model.planet.radius^-2
+    return (air=fac*state.mass_air, consvar=fac*state.mass_consvar)
 end
 
 end # module

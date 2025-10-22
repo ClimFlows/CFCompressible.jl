@@ -1,7 +1,7 @@
 name = "CFCompressible"
 uuid = "a33e4613-43be-4f0e-b500-138f013d70af"
 authors = ["Thomas Dubos <thomas.dubos@polytechnique.edu>"]
-version = "0.1.0"
+version = "0.1.1"
 
 [deps]
 CFBatchSolvers = "4c829458-57b5-4508-983f-2f0f605f5bfa"
@@ -14,8 +14,8 @@ MutatingOrNot = "6a37069a-9a67-4b2d-a34a-f09ab4b23c7c"
 SHTnsSpheres = "9e5c175a-5132-4517-85a1-2957ec255f89"
 
 [compat]
-CFBatchSolvers = "0.1.0"
-CFDomains = "0.3.5"
+CFBatchSolvers = "0.1.1"
+CFDomains = "0.3.7"
 CFHydrostatics = "0.4.1"
 CFPlanets = "0.1.2"
 CookBooks = "0.2.0"

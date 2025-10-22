@@ -224,7 +224,7 @@ function residual(H, tau, state, Phi_star, W_star)
     return rPhi, rW
 end
 
-function hydrostatic_geopotential!(H, m, S, Phi)
+function hydrostatic_geopotential!(H, m::V, S::V, Phi::V) where {V<:AbstractVector}
     (; gas, Phis, ptop, J) = H
     pl, Phil = ptop + sum(m)/J, Phis # surface pressure & geopotential
     for k in eachindex(m)
@@ -334,36 +334,58 @@ end
 #================== 3D backward Euler step ================#
 
 function batched_bwd_Euler!(model, ps, state, tau, check=false)
+    return batched_bwd_Euler!(void, void, void, model, ps, state, tau, check)
+end
+
+function batched_bwd_Euler!(Phil_, Wl_, tridiag_, model, ps, state, tau, check=false)
     (; mgr, newton, vcoord, planet, gas, Phis, rhob) = model
     (; niter, flip_solve, verbose) = newton
     ptop, gravity, Jac = vcoord.ptop, planet.gravity, planet.radius^2/planet.gravity
     H = VerticalEnergy(gas, gravity, Jac, ptop, Phis, ps, rhob)
 
-    (mk, ml, Sk, Phi_star, W_star) = state
-    Wl, Phil, DPhil, dPhil = copy(W_star), copy(Phi_star), zero(Phi_star), similar(Phi_star)
+    (mk, ml, Sk, Phi_old, W_old) = state
 
-    tridiag = batched_Newton_iteration(void, mgr, H, mk, Sk, Phi_star, W_star, Phil, DPhil, dPhil, tau, 1, flip_solve, check)
+    # Phil, DPhil, dPhil = copy(Phi_old), zero(Phi_old), similar(Phi_old)
+    Phil = similar!(Phil_, Phi_old)
+    DPhil = similar!(tridiag_.DPhil, Phi_old)
+    dPhil = similar!(tridiag_.dPhil, Phi_old)
+#    @. Phil = Phi_old
+#    @. DPhil = 0
+    hydrostatic_geopotential!(H, mk, Sk, Phil)
+    @. DPhil = Phil-Phi_old
+        
+    tridiag = batched_Newton_iteration(tridiag_, mgr, H, mk, Sk, Phi_old, W_old, Phil, DPhil, dPhil, tau, 1, flip_solve, check)
 
+    Wl = similar!(Wl_, W_old)
     if tau>0
         for iter in 2:niter
-            batched_Newton_iteration(tridiag, mgr, H, mk, Sk, Phi_star, W_star, Phil, DPhil, dPhil, tau, iter, flip_solve, check)
+            batched_Newton_iteration(tridiag, mgr, H, mk, Sk, Phi_old, W_old, Phil, DPhil, dPhil, tau, iter, flip_solve, check)
         end
-        verbose && @info "Batched update after $niter Newton iterations" extrema(Phi_star) extrema(DPhil) extrema(dPhil)
+        verbose && @info "Batched update after $niter Newton iterations" extrema(Phi_old) extrema(DPhil) extrema(dPhil)
         # update W
         inv_tau_g2 = inv(tau * gravity^2)
-        Wl = @. inv_tau_g2 * ml * DPhil
+        @. Wl = inv_tau_g2 * ml * DPhil
     else
-        Wl = copy(W_star)
+        @. Wl = W_old
     end
-    return Phil, Wl, tridiag
+    return Phil, Wl, merge(tridiag, (; DPhil, dPhil))
 end
 
-function batched_Newton_iteration(tridiag_, mgr, H, mk, Sk, Phi_star, W_star, Phil, DPhil, dPhil, tau, iter, flip_solve, check)
+function batched_Newton_iteration(tridiag_, mgr, H, mk::M, Sk::M, Phi_star::M, W_star::M, Phil::M, DPhil::M, dPhil::M, tau, iter, flip_solve, check) where { M<:AbstractMatrix}
+    # present 2D arrays as 3D
+    reshp(x::M) = reshape(x, (size(x,1), 1, size(x, 2)))
+    return batched_Newton_iteration(tridiag_, mgr, H, map(reshp, (mk, Sk, Phi_star, W_star, Phil, DPhil, dPhil))..., tau, iter, flip_solve, check)
+end
+
+function batched_Newton_iteration(tmp, mgr, H, mk, Sk, Phi_star, W_star, Phil, DPhil, dPhil, tau, iter, flip_solve, check)
     @. Phil = Phi_star + DPhil
-    (; R, A, B) = tri = batched_tridiag_problem!(tridiag_, mgr, H, (mk, Sk, Phil), Phi_star, W_star, tau)
-    Solvers.Thomas!(dPhil, A, B, R, flip_solve)
+    (; R, A, B) = tri = batched_tridiag_problem!(tmp, mgr, H, (mk, Sk, Phil), Phi_star, W_star, tau)
+    C, D = similar!(tmp.C, A), similar!(tmp.D, B)
+    Solvers.Thomas!(dPhil, C, D, A, B, R, flip_solve)
     @. DPhil += dPhil
 
+    # @info "batched_Newton_iteration" extrema(DPhil[:,:,end]) extrema(dPhil[:,:,end])
+    
     # verify batched_tridiag_problem! and batched_Thomas
     check && for i in axes(mk,1), j in axes(mk,2)
         H_ij = VerticalEnergy(gas, gravity, Jac, ptop, Phis[i,j], ps[i,j], rhob)
@@ -387,7 +409,61 @@ function batched_Newton_iteration(tridiag_, mgr, H, mk, Sk, Phi_star, W_star, Ph
         end
     end
 
-    return tri
+    return merge(tri, (; C, D))
+end
+
+
+function hydrostatic_geopotential!(H, m::M, S::M, Phi::M) where {M<:AbstractMatrix}
+    (; Phis, ptop, pb, J, ptop, gas) = H  # Phis and pb are 1D arrays
+    sizes = map(size, (; m, S, Phi, pb, Phis))
+    # @info "hydrostatic_geopotential!" sizes
+
+    inv_J = inv(J)
+    #=@with mgr =# let irange = axes(Phi, 1)
+        #= @inbounds=# for l in axes(Phi, 2)
+            #= @vec =# for i in irange
+                if l==1
+                    Phi[i,end] = pb[i] # store surface pressure in Phi[:,Nz+1]
+                    Phi[i,l] = Phis[i]
+                else
+                    mk, Sk = m[i,l-1], S[i,l-1]
+                    pl, dp = Phi[i,end], inv_J*mk
+                    Phi[i,end] = pl-dp # pressure at current interface
+                    vol = gas(:p, :consvar).specific_volume(pl - dp/2, Sk/mk)
+                    @assert mk>0
+                    @assert vol>0
+                    Phi[i,l] = Phi[i,l-1] + vol*dp
+                end
+            end
+        end
+    end
+    # @info "hydrostatic_geopotential!" extrema(Phi[:,2]-Phi[:,1]) extrema(Phi[:,1]-Phis[:])
+end
+
+const Array3D{T} = AbstractArray{T,3}
+
+function hydrostatic_geopotential!(H, m::A, S::A, Phi::A) where {A<:Array3D}
+    (; Phis, ptop, pb, J, ptop, gas) = H  # Phis and pb are 1D arrays
+    sizes = map(size, (; m, S, Phi, pb, Phis))
+    # @info "hydrostatic_geopotential" sizes
+
+    inv_J = inv(J)
+    #=@with mgr =# let (irange, jrange) = (axes(Phi, 1), axes(Phi,2))
+        #= @inbounds=# for l in axes(Phi, 3), j in jrange
+            #= @vec =# for i in irange
+                if l==1
+                    Phi[i,j,end] = pb[i,j] # store surface pressure in Phi[:,Nz+1]
+                    Phi[i,j,l] = Phis[i,j]
+                else
+                    mk, Sk = m[i,j,l-1], S[i,j,l-1]
+                    pl, dp = Phi[i,j,end], inv_J*mk
+                    Phi[i,j,end] = pl-dp # pressure at current interface
+                    vol = gas(:p, :consvar).specific_volume(pl - dp/2, Sk/mk)
+                    Phi[i,j,l] = Phi[i,j,l-1] + vol*dp
+                end
+            end
+        end
+    end
 end
 
 function batched_tridiag_problem!(tridiag, mgr, H, state, Phi_star, W_star, tau)
@@ -396,12 +472,15 @@ function batched_tridiag_problem!(tridiag, mgr, H, state, Phi_star, W_star, tau)
 
     Jp = similar!(tridiag.Jp, m)
     A = similar!(tridiag.A, m)
+    # @info "batched_tridiag_problem" extrema(Phi[:,:,2]-Phi[:,:,1]) extrema(Phi[:,:,1]-Phis[:,:])
+
     @with mgr let (irange, jrange, krange) = axes(m)
         @inbounds for j in jrange, k in krange
             @vec for i in irange
                 invm = inv(m[i,j,k])
                 consvar = invm * S[i,j,k] 
                 vol = J * invm * (Phi[i,j,k + 1] - Phi[i,j,k])
+                # @assert vol>0 "vol[$i, $j, $k]<=0"
                 p = @inline gas(:v, :consvar).pressure(vol, consvar)
                 Jp[i,j,k] = J * p
                 # off-diagonal coeffcient A[k]
@@ -416,7 +495,7 @@ function batched_tridiag_problem!(tridiag, mgr, H, state, Phi_star, W_star, tau)
     @with mgr let (irange, jrange, lrange) = axes(Phi)
         Nz = size(m,3)
         @inbounds for j in jrange, l in lrange
-            @vec for i in irange
+            #=@vec=# for i in irange # FIXME
                 if l == 1
                     Jp_up = Jp[i,j,l] 
                     Jp_down = J * (pb[i,j] - rhob * (Phi[i,j,1] - Phis[i,j]) ) 

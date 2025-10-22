@@ -1,0 +1,418 @@
+module VoronoiDynamics
+
+using CFPlanets: lonlat_from_cov
+using CFDomains: Stencils, VoronoiSphere, shell, VHLayout, transpose!
+using CFDomains.ZeroArrays: zero_array
+
+using MutatingOrNot: MutatingOrNot, void, Void, similar! as sim!
+using ManagedLoops: @with, @vec, @unroll
+
+import ..CFCompressible: FCE_tendencies!
+using ..CFCompressible.VerticalDynamics: VerticalEnergy, batched_bwd_Euler!, ref_bwd_Euler!
+
+# using ..ZeroArrays: ZeroArray
+
+#= Units
+[m] = kg
+[w] = s             w = g⁻²̇Φ
+[W] = kg⋅s             
+[p] = kg⋅m⁻¹⋅s⁻²
+[ρ] = kg⋅m⁻³
+[Jac] = m⋅s²         Jac = a²/g
+[Jp] = kg
+=#
+
+#=
+Computation of tendencies is split into the following steps:
+1- Evaluate spatial inputs of HEVI solver: Phiₗ, Wₗ, mₖ, mₗ, sₖ
+2- HEVI solver => new spatial values of W, Phi
+3- fast tendencies for W, Phi
+4- fast tendencies for ucov
+5- new values for ucov
+6- slow tendencies for masses (mass budgets) and W, Phi (advection)
+7- slow tendencies for ucov (curl form)
+=#
+
+const State = NamedTuple{(:mass_air, :mass_consvar, :ucov, :Phi, :W)}
+const MaybeState = Union{Void, State}
+
+model_state(mass_air, mass_consvar, ucov, Phi, W) = (; mass_air, mass_consvar, ucov, Phi, W)
+
+function FCE_tendencies!(slow::MaybeState, fast::MaybeState, tmp, model, ::VoronoiSphere, state::State, tau)
+    # layout:
+    #   (k,ij), better for horizontal stencils: state.X
+    #   (ij,k), better for implicit step:       common.X
+
+    # @info "FCE_tendencies!" extrema(state.mass_air[end,:])
+    # if !all(x->(x>0), state.mass_air)
+    #     @error "negative air mass found!" findall(x->(x<0), state.mass_air)
+    #     @assert all(x->(x>0), state.mass_air) 
+    # end
+    common = spatial_fields!(tmp.common, model, state) # mk, Sk, Phil, ps, sk, ml
+
+    new_Phil, new_Wl, tridiag = batched_bwd_Euler!(tmp.new_Phil, tmp.new_Wl, tmp.tridiag,
+                                                   model, common.ps,
+                                                   (common.mk, common.ml, common.Sk,
+                                                    common.Phil, common.Wl), tau)
+    dPhil, dWl, fast_HV = fast_tendencies_PhiW!(tmp.dPhil, tmp.dWl,
+                                                          tmp.fast_HV, model,
+                                                          common, new_Phil,
+                                                          new_Wl)
+    Phil = transpose!(tmp.Phil, model.mgr, new_Phil)
+    Wl = transpose!(tmp.Wl, model.mgr, new_Wl)
+    fast_dPhil = transpose!(fast.Phi, model.mgr, dPhil)
+    fast_dWl = transpose!(fast.W, model.mgr, dWl)
+
+    # from now on we need to compute horizontal operators
+    # this is best done in layout [k,ij] => transpose fields
+    fast_VH = fields_VH!(tmp.fast_VH, model.mgr, common, fast_HV)
+
+    fast_ducov = fast_tendencies_ucov!(fast.ucov, model, state.ucov,
+                                        fast_VH.sk, fast_VH.dHdm, fast_VH.dHdS)
+    zero_mass = zero_array(state.mass_air)
+    fast = model_state(zero_mass, zero_mass, fast_ducov, fast_dPhil, fast_dWl) # air, consvar, ucov, Phi, W
+
+    new_ucov = (@. tmp.new_ucov = state.ucov + tau*fast_ducov)
+    new_state = (; mk=state.mass_air, sk=fast_VH.sk, invml=fast_VH.invml, ucov=new_ucov, Phil, Wl) # masses are unchanged
+
+    # steps 6-7
+    slow, tmp_slow = slow!(slow, tmp.tmp_slow, model, new_state)
+    tmp_ = (; common, new_Phil, new_Wl, tridiag, dPhil, dWl, fast_HV, Phil, Wl, fast_dPhil, fast_dWl, fast_VH, new_ucov, tmp_slow)
+    return slow, fast, tmp_
+
+    let # debug
+        @info "common" map(size, common)
+        @info "batched_bwd_Euler!" size(new_Phil) size(new_Wl) map(size, tridiag)
+        @info "tendencies! with tau = $tau" extrema(common.ps) extrema(common.Phil)
+        dw = dWl./common.ml
+        @info "fast" extrema(fast_dPhil) extrema(dw).*model.planet.gravity^2 
+        @info "new_state" map(size, new_state)
+    end
+
+end
+
+function spatial_fields!(tmp, model, state)
+    (; vcoord, planet, mgr) = model
+    ptop, inv_Jac = vcoord.ptop, planet.gravity/planet.radius^2
+
+    # state fields are in (k, ij) layout
+    mk = transpose!(tmp.mk, mgr, state.mass_air)
+    Sk = transpose!(tmp.Sk, mgr, state.mass_consvar)
+    Phil = transpose!(tmp.Phil, mgr, state.Phi)
+    Wl = transpose!(tmp.Wl, mgr, state.W)
+
+    # now work in (ij, k) layout
+    ps = sim!(tmp.ps, @view mk[:, 1])
+    sk = sim!(tmp.sk, Sk)
+    ml = sim!(tmp.ml, Phil)
+
+    @with mgr let ijrange = axes(mk, 1)
+        Nz = size(mk, 2)
+        for l in 1:(Nz + 1)
+            for ij in ijrange
+                if l == 1
+                    mm = mk[ij, 1] / 2
+                elseif l == Nz + 1
+                    mm = mk[ij, Nz] / 2
+                else
+                    mm = (mk[ij, l - 1] + mk[ij, l]) / 2
+                end
+                ml[ij, l] = mm
+            end
+        end
+        for ij in ijrange
+            ps[ij] = ptop
+        end
+        for k in 1:Nz
+            @vec for ij in ijrange
+                ps[ij] += inv_Jac*mk[ij, k]
+                sk[ij, k] = Sk[ij, k] / mk[ij, k]
+            end
+        end
+    end # @with
+
+    return (; mk, Sk, Phil, Wl, sk, ml, ps)
+end
+
+function fields_VH!(tmp, mgr, common, fast_spat)
+    sk = transpose!(tmp.sk, mgr, common.sk)
+    dHdm = transpose!(tmp.dHdm, mgr, fast_spat.dHdm)
+    dHdS = transpose!(tmp.dHdS, mgr, fast_spat.dHdS)
+    invml = transpose!(tmp.invml, mgr, common.ml)
+    @. invml = inv(invml)
+    return (; sk, invml, dHdm, dHdS)
+end
+
+#============= fast tendencies ================#
+
+zero!(x) = @. x=0
+
+function fast_tendencies_PhiW!(dPhil_, dWl_, tmp, model, common, Phil, Wl)
+    @assert axes(Wl) == axes(Phil)
+    # layout is [ij,k]
+    (; Phis, rhob) = model # bottom boundary condition p = ps - rhob*(Phi-Phis)
+    (; vcoord, planet, gas) = model
+    (; mk, sk, ml, ps) = common
+
+    dWl = sim!(dWl_, Wl) # = -dHdPhi
+    dPhil = sim!(dPhil_, Phil) # =+dHdW
+    dHdm = sim!(tmp.dHdm, mk)
+    dHdS = sim!(tmp.dHdS, sk)
+
+    ptop, grav2, Jac = vcoord.ptop, planet.gravity^2, planet.radius^2/planet.gravity
+
+    foreach(zero!, (dWl, dHdm, dHdS))
+
+    # FIXME: rewrite to avoid writing in several passes
+    @with model.mgr let ijrange = axes(mk, 1)
+        Nz = size(mk, 2)
+        for l in 1:(Nz + 1)
+            @vec for ij in ijrange
+                wm = Wl[ij, l] / ml[ij, l]
+                dPhil[ij, l] = grav2 * wm
+                l > 1 && (dHdm[ij, l - 1] -= grav2 * wm^2/4)
+                l <= Nz && (dHdm[ij, l] -= grav2 * wm^2/4)
+            end
+        end
+        for k in 1:Nz
+            @vec for ij in ijrange
+                # potential
+                dHdm[ij, k] += (Phil[ij, k+1] + Phil[ij, k]) / 2
+                dHdm[ij, k] -= Phil[ij, 1]-Phis[ij] # contribution due to elastic bottom BC
+                dWl[ij, k] -= mk[ij, k] / 2
+                dWl[ij, k+1] -= mk[ij, k] / 2
+                # internal
+                s = sk[ij, k]
+                vol = Jac * (Phil[ij, k+1] - Phil[ij, k]) / mk[ij, k]
+                p = gas(:v, :consvar).pressure(vol, s)
+                Jp = Jac * p
+                dWl[ij, k] -= Jp
+                dWl[ij, k+1] += Jp
+                h, _, exner = gas(:p, :consvar).exner_functions(p, s)
+                dHdm[ij, k] += h - s * exner
+                dHdS[ij, k] += exner
+            end
+        end
+        # boundary
+        @vec for ij in ijrange
+            dWl[ij, Nz+1] -= Jac * ptop
+            dWl[ij, 1] -= Jac * (rhob * (Phil[ij, 1] - Phis[ij]) - ps[ij])
+        end
+    end # @with
+
+    # @. dPhil = grav2*(Wl/ml) # FIXME
+    # @info "fast_tendencies_PhiW!" maximum(abs, dWl)/maximum(abs,Wl)
+
+    return dPhil, dWl, (; dHdm, dHdS)
+end
+
+function fast_tendencies_ucov!(ducov_, model, ucov, consvar, B, exner)
+    # layout is [k, ij]
+    ducov = sim!(ducov_, ucov)
+    vsphere = model.domain.layer
+
+    #=@with model.mgr, =#
+    let (krange, ijrange) = axes(ducov)
+        #=@inbounds=# for ij in ijrange
+            grad = Stencils.gradient(vsphere, ij) # covariant gradient
+            avg = Stencils.average_ie(vsphere, ij) # centered average from cells to edges
+            #=@vec=# for k in krange
+                ducov[k, ij] = - muladd(avg(consvar, k), grad(exner, k), grad(B, k))
+            end
+        end
+    end
+    return ducov
+end
+
+# ============= slow tendencies ================ #
+
+function slow!(dstate, tmp, model, new_state)
+    # layout is [k,ij]
+    (; mgr, planet) = model      # parameters
+    factor = planet.radius^-2
+    vsphere = model.domain.layer
+    (; invml, mk, sk, ucov, Phil, Wl) = new_state # inputs
+    Nz = size(mk, 1)
+
+    wl = wl!(sim!(tmp.wl, Wl), mgr, invml, Wl)
+
+    u_ke, U_ke, sU_ke = sU_ke!(sim!(tmp.u_ke, ucov), sim!(tmp.U_ke, ucov), sim!(tmp.sU_ke, ucov), mgr, vsphere, factor, wl, Phil, mk, ucov, sk)
+    U_le = U_le!(sim!(tmp.U_le, ucov, Nz+1, size(ucov,2)), mgr, U_ke)
+    wU, ∇Φ = wU_gradPhi!(sim!(tmp.wU, U_le), sim!(tmp.∇Φ, U_le), mgr, vsphere, wl, U_le, Phil)
+
+    dPhi = dPhi_dt!(sim!(dstate.Phi, Phil), mgr, vsphere, invml, U_le, ∇Φ)
+    B = Bernoulli!(sim!(tmp.B, mk), mgr, vsphere, factor, mk, u_ke, wl, dPhi)
+
+    dmass_air = dmass!(sim!(dstate.mass_air, mk), mgr, vsphere, U_ke)
+    dmass_consvar = dmass!(sim!(dstate.mass_consvar, mk), mgr, vsphere, sU_ke)
+    dW = dmass!(sim!(dstate.W, Wl), mgr, vsphere, wU)
+
+    fcov = model.fcov
+    PV_v = PV_v!(sim!(tmp.PV_v, ucov, size(ucov,1), length(fcov)), mgr, vsphere, fcov, mk, ucov)
+    PV_e = PV_e!(sim!(tmp.PV_e, ucov), mgr, vsphere, PV_v)
+    ducov = curl_form!(sim!(dstate.ucov, ucov), mgr, vsphere, PV_e, U_ke, B)
+
+    tmp = (; u_ke, U_ke, sU_ke, wl, U_le, wU, ∇Φ, B, PV_v, PV_e)
+    return model_state(dmass_air, dmass_consvar, ducov, dPhi, dW), tmp        
+end
+
+function wl!(wl, mgr, invml, Wl)
+    @with mgr let (lrange, cells) = axes(Wl)
+        @vec for l in lrange, ij in cells            
+            wl[l,ij] = invml[l,ij]*Wl[l,ij]
+        end
+    end
+    return wl
+end
+
+function sU_ke!(u_ke, U_ke, sU_ke, mgr, vsphere, factor, wl, Phil, mk, ucov, sk) # contravariant fluxes of mass and conservative variable
+    le_de = vsphere.le_de
+    @with mgr let (krange, edges) = axes(U_ke)
+        for edge in edges
+            grad = Stencils.gradient(vsphere, edge) # covariant gradient
+            avg_ie = Stencils.average_ie(vsphere, edge) # centered average from cells to edges
+            cov_to_contra = factor*le_de[edge]
+            @vec for k in krange
+                w∇Φ = (avg_ie(wl, k)*grad(Phil, k) + avg_ie(wl, k+1)*grad(Phil, k+1))/2
+                u_ke[k, edge] = cov_to_contra*(ucov[k,edge]-w∇Φ)
+                U_ke[k, edge] = avg_ie(mk, k) * u_ke[k, edge]
+                sU_ke[k,edge] = avg_ie(sk, k) * U_ke[k, edge]
+            end
+        end
+    end
+    return u_ke, U_ke, sU_ke
+end
+
+function U_le!(U_le, mgr, U_ke) # contravariant mass flux at dual vertical cells
+    Nz = size(U_ke, 1)
+    # top and bottom interfaces
+    @with mgr let edges = axes(U_le,2)
+        for edge in edges
+            U_le[1,edge] = U_ke[1, edge]/2
+            U_le[Nz+1,edge] = U_ke[Nz, edge]/2
+        end
+    end
+    # interior interfaces
+    @with mgr let (lrange, edges) = (2:Nz, axes(U_le,2))
+        for edge in edges
+            @vec for l in lrange
+                U_le[l,edge] = (U_ke[l, edge]+U_ke[l-1,edge])/2
+            end
+        end
+    end
+    return U_le
+end
+
+function wU_gradPhi!(wU, ∇Φ, mgr, vsphere, wl, U_le, Phil)
+    @with mgr let (lrange, edges) = axes(wU)
+        for edge in edges
+            avg_ie = Stencils.average_ie(vsphere, edge) # centered average from cells to edges
+            grad = Stencils.gradient(vsphere, edge) # covariant gradient
+            @vec for l in lrange
+                wU[l,edge] = avg_ie(wl, l)*U_le[l,edge]
+                ∇Φ[l,edge] = grad(Phil, l)
+            end
+        end
+    end
+    return wU, ∇Φ
+end
+
+function dPhi_dt!(dPhi, mgr, vsphere, invml, U_le, ∇Φ) # ∂ₜΦ = -u⋅∇Φ 
+    sph = Stencils.contraction(vsphere)
+    degree = vsphere.primal_deg
+    @with mgr let (lrange, cells) = axes(dPhi)
+        for cell in cells
+            deg = degree[cell]
+            @unroll deg in 5:7 begin
+                prod = Stencils.contraction(sph, cell, Val(deg))
+                @vec for l in lrange
+                    dPhi[l, cell] = -invml[l, cell] * prod(U_le, ∇Φ, l)
+                end
+            end
+        end
+    end
+    return dPhi
+end
+
+function Bernoulli!(B, mgr, vsphere, factor, mk, u_ke, wl, dPhi) # Bernoulli function B = u⋅u/2 + (u⋅∇Φ)W/m
+    sph = Stencils.dot_prod_contra(vsphere)
+    degree = vsphere.primal_deg
+    @with mgr let (krange, cells) = axes(B)
+        for cell in cells
+            deg = degree[cell]
+            @unroll deg in 5:7 begin
+                prod = Stencils.dot_prod_contra(sph, cell, Val(deg))
+                @vec for k in krange 
+                    K = prod(u_ke, u_ke, k)/(2*factor) # a^2 u⋅u/2
+                    B[k, cell] = K - (wl[k,cell]*dPhi[k,cell] + wl[k+1,cell]*dPhi[k+1,cell])/2
+                end
+            end
+        end
+    end
+    return B
+end
+
+function dmass!(dmass, mgr, vsphere, U) # ∂ₜm = -∇⋅U 
+    degree = vsphere.primal_deg
+    @with mgr let (krange, cells) = axes(dmass)
+        for cell in cells
+            deg = degree[cell]
+            @unroll deg in 5:7 begin
+                dvg = Stencils.divergence(vsphere, cell, Val(deg))
+                @vec for k in krange
+                    dmass[k, cell] = -dvg(U,k)
+                end
+            end
+        end
+    end
+    return dmass
+end
+
+function PV_v!(PV_v, mgr, vsphere, fcov, mass_air, ucov)
+    @with mgr let (krange, vertices) = axes(PV_v)
+        @inbounds for vertex in vertices
+            curl = Stencils.curl(vsphere, vertex)
+            avg = Stencils.average_iv(vsphere, vertex) # area-weighted average from cells to vertices
+            Av = vsphere.Av[vertex]    # unit sphere cell area
+            fcov_ij = fcov[vertex]     # Coriolis * cell area Av
+            @vec for k in krange
+                zeta = curl(ucov, k)   # vorticity * Av
+                mv = Av * avg(mass_air, k)  # mass * Av
+                PV_v[k, vertex] = (zeta + fcov_ij) * inv(mv)
+            end
+        end
+    end
+    return PV_v
+end
+
+function PV_e!(PV_e, mgr, vsphere, PV_v)
+    @with mgr let (krange, edges) = axes(PV_e)
+        @inbounds for edge in edges
+            avg = Stencils.average_ve(vsphere, edge) # centered averaging from vertices to edges
+            @vec for k in krange
+                PV_e[k, edge] = avg(PV_v, k)
+            end
+        end
+    end
+    return PV_e
+end
+
+function curl_form!(ducov, mgr, vsphere, PV_e, U, B)
+    @with mgr let (krange, edges) = axes(ducov)
+        @inbounds for edge in edges
+            grad = Stencils.gradient(vsphere, edge) # covariant gradient
+            avg = Stencils.average_ie(vsphere, edge) # centered average from cells to edges
+            deg = vsphere.trisk_deg[edge]
+            # @assert deg in 9:11 "deg=$deg not in 9:11"
+            @unroll deg in 9:11 begin
+                trisk = Stencils.TRiSK(vsphere, edge, Val(deg))
+                @vec for k in krange
+                    ducov[k, edge] = trisk(U, PV_e, k) - grad(B, k)
+                end
+            end
+        end
+    end
+    return ducov
+end
+
+end # module

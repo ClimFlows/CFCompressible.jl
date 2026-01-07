@@ -593,32 +593,7 @@ end
 
 ## STATE BOUNDARY CONDITION
 
-"""
-    state_bc!(model, state, scratch) -> NamedTuple
-
-Apply physical boundary conditions in-place to the prognostic **state variables**
-of a 2D fully-compressible model.
-
-This routine enforces boundary conditions on the velocity components
-`u`, `w`, and on either the conservative thermodynamic variable `consvar`
-*or* the temperature `T`, depending on the boundary-condition configuration.
-The remaining thermodynamic quantity is reconstructed consistently.
-
-# Arguments
-- `model`
-- `(; m, u, w)`
-- `(p, consvar, comp, T)`:
-
-# Boundary-condition logic
-Exactly one of the following must be specified:
-- Boundary conditions on `(consvar, q)`
-- Boundary conditions on `(T, q)`
-
-Specifying both `consvar` and `T` boundary conditions is an error.
-
-# Returns
-A named tuple `(m = m, u = u, w = w)` with boundary conditions applied.
-"""
+# apply physical boundary conditions in-place to the prognostic state variables of a 2D fully-compressible model
 function state_bc!(model::FC2D, (; m, u, w)::NamedTuple, (p, consvar, comp, T)::Tuple)
     (; boundary, fluid) = model
 

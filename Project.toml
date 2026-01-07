@@ -1,13 +1,16 @@
 name = "CFCompressible"
 uuid = "a33e4613-43be-4f0e-b500-138f013d70af"
-authors = ["Thomas Dubos <thomas.dubos@polytechnique.edu>"]
-version = "0.1.1"
+authors = ["Thomas Dubos <thomas.dubos@polytechnique.edu>, Benedict Hatton"]
+version = "0.1.2"
 
 [deps]
 CFBatchSolvers = "4c829458-57b5-4508-983f-2f0f605f5bfa"
+CFBoxes = "435ea534-530f-4103-a4e2-07b06daf33cf"
+CFDiffusionSchemes = "c98386de-3084-4a91-9df5-5a8c5033d229"
 CFDomains = "3699aaca-035b-4155-96ec-eecb526248de"
 CFHydrostatics = "0dc8c93d-0116-402a-b00b-85ddfe5501a2"
 CFPlanets = "9c2ca15e-caec-41c0-a22c-2e93fe5a241f"
+CFTimeSchemes = "79282218-dfaf-41aa-91df-a06f65ece871"
 CookBooks = "7bce7c31-0f61-4fd7-bdaf-6b04abfa2cc7"
 ManagedLoops = "36a4119d-6b73-4371-88fe-ba2d91f5495d"
 MutatingOrNot = "6a37069a-9a67-4b2d-a34a-f09ab4b23c7c"
@@ -15,9 +18,12 @@ SHTnsSpheres = "9e5c175a-5132-4517-85a1-2957ec255f89"
 
 [compat]
 CFBatchSolvers = "0.1.1"
+CFBoxes = "0.0.3"
+CFDiffusionSchemes = "0.0.2"
 CFDomains = "0.3.7"
 CFHydrostatics = "0.4.1"
 CFPlanets = "0.1.2"
+CFTimeSchemes = "0.3.7"
 CookBooks = "0.2.0"
 ManagedLoops = "0.1.13"
 MutatingOrNot = "0.1.4"

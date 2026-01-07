@@ -85,12 +85,15 @@ initialize(model::FC2D, params) = BoxInitialize.initialize(model, params)
 
 # specify main time integration loop
 """
-    loop(model, time_scheme, params; write_func = write_func, write_obj = nothing, plot_func = plot_func, plot_obj = nothing)
+    loop(model::FC2D, time_scheme, params; write_data = write_data, data_storage = nothing, plot_data = plot_data)
 Main time integration loop for the FC2D model.
+- `model`: FC2D model instance
+- `time_scheme`: time integration scheme
+- `params`: parameters dictionary
 - `write_func`: function to write data at each time slice
-- `write_obj`: object to pass to write_func (e.g., file handle) 
+- `write_obj`: object to pass to write_func (e.g., data storage)
 - `plot_func`: function to plot data at each time slice
-- `plot_obj`: object to pass to plot_func (e.g., plot handle)
+- `plot_obj`: object to pass to plot_func (e.g., plot storage)
 """
 loop(model::FC2D, time_scheme, params; kwargs...) = Loops.loop(model, time_scheme, params; kwargs...)
 

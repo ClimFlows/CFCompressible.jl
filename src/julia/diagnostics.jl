@@ -19,11 +19,7 @@ using ..CFCompressible.Dynamics: FCE_tendencies!
 
 #======================= FCE Diagnostics =======================#
 
-"""
-    diagnostics_FCE()
-Return a `CookBook` of diagnostic functions for the `FCE` model.
-"""
-
+# Return a CookBook of diagnostic functions for the FCE model.
 function diagnostics_FCE()
     return CookBook(;
                     # used for dispatch
@@ -148,11 +144,8 @@ end
 
 # ======================= FC2D Diagnostics =======================#
 
-"""
-    diagnostics_FC2D()
-Return a `CookBook` of diagnostic functions for the `FC2D` model.
-"""
 
+# Return a CookBook of diagnostic functions for the FC2D model.
 diagnostics_FC2D() = CookBook(;
     r           = state -> state.m[:, :, 1],
     s           = state -> state.m[:, :, 2] ./ state.m[:, :, 1],

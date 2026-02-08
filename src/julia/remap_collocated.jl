@@ -1,8 +1,143 @@
 module RemapCollocated
 
-using CFTransport: remap_fluxes!
-using CFDomains: mass_coordinate
 using CFHydrostatics.RemapHPE: vanleer, remap_density!, remap_scalar!, update_mass!, flatten
+using CFDomains: mass_coordinate, data_layout
+using CFTransport: remap_fluxes!, mass_flux_dual!
+using MutatingOrNot: similar!
+using ManagedLoops: @with, @vec
+
+# these functionas are called from RemapSpectral
+# here we put everything that does not require SHTnsSpheres
+
+function cov_to_horiz!(uv, mass, q, mgr, metric, gradPhi, W, massq)
+    (; ucolat, ulon) = uv
+    Phi_colat, Phi_lon = gradPhi
+    @with mgr let (irange, jrange) = (axes(ucolat, 1), axes(ucolat, 2))
+        krange = axes(ucolat, 3)
+        # horizontal NH momentum (covariant)
+        for (ui, Phi_i) in ((ucolat, Phi_colat), (ulon, Phi_lon))
+            for j in jrange, k in krange
+                @vec for i in irange
+                    ui[i, j, k] -= (Phi_i[i, j, k] * W[i, j, k] +
+                                   Phi_i[i, j, k + 1] * W[i, j, k + 1]) /
+                                   (2 * mass[i, j, k])
+                end # i
+            end # j,k
+        end # colat, lon
+        # compute q, apply metric factor to mass
+        for j in jrange, k in krange
+            @vec for i in irange
+                q[i, j, k] = massq[i, j, k]/mass[i, j ,k]
+                mass[i, j, k] *= metric
+            end
+        end
+    end # @with
+    return nothing
+end
+
+function NH_pressure!(p_hydro, p_NH, mgr, gas, ptop, mass, consvar, Phi)
+    pressure = gas(:v, :consvar).pressure 
+    @with mgr let (irange, jrange) = (axes(p_NH, 1), axes(p_NH, 2))
+        nz = size(p_NH, 3)
+        for j in jrange
+            # mass is per unit area, includes gravity => same unit as pressure, as in HPE
+            let k=nz
+                @vec for i in irange
+                    vol = (Phi[i,j,k+1]-Phi[i,j,k])/mass[i,j,k]
+                    p_hydro[i, j, nz] = ptop + mass[i, j, nz] / 2
+                    p_NH[i,j,k] = pressure(vol, consvar[i,j,k]) - p_hydro[i,j,k]
+                end
+            end
+            for k in nz-1:-1:1
+                @vec for i in irange
+                    vol = (Phi[i,j,k+1]-Phi[i,j,k])/(mass[i,j,k])                   
+                    p_hydro[i, j, k] = p_hydro[i, j, k+1] + (mass[i, j, k] + mass[i, j, k+1])/2
+                    p_NH[i,j,k] = pressure(vol, consvar[i,j,k]) - p_hydro[i,j,k]
+                end
+            end
+        end
+    end
+    return nothing
+end
+
+function remap_FCE!(new, tmp, mgr, vcoord, layout, now, schemes=(scalar=vanleer, momentum=vanleer))
+    (; mass, W, q, ux, uy, p_NH) = map( x->flatten(x, layout), now)
+    momentum = schemes.momentum(:scalar, layout)
+    scalar = schemes.scalar(:scalar, layout)
+    density = schemes.scalar(:density, layout)
+    # mass fluxes and new mass
+    mcoord = mass_coordinate(vcoord, one(eltype(mass)))
+    flux, new_mass = remap_fluxes!(mgr, mcoord, flatten(layout), tmp.flux, tmp.new_mass, #==# mass)
+    # scalars
+    fluxq = similar!(tmp.fluxq, flux)
+    slope = similar!(tmp.slope, q)
+    new_q = remap_scalar!(mgr, scalar, new.q, #==# fluxq, slope, #==# q, mass, flux)
+    new_p_NH = remap_scalar!(mgr, scalar, new.p_NH, #==# fluxq, slope, #==# p_NH, mass, flux)
+    new_ux = remap_scalar!(mgr, momentum, new.ux, #==# fluxq, slope, #==# ux, mass, flux)
+    new_uy = remap_scalar!(mgr, momentum, new.uy, #==# fluxq, slope, #==# uy, mass, flux)
+    # densities
+    mass_dual, flux_dual = mass_flux_dual!(tmp.mass_dual, tmp.flux_dual, mgr, flatten(layout), mass, flux)
+    w = similar!(tmp.w, W)
+    slopeW = similar!(tmp.slopeW, W)
+    fluxW = similar!(tmp.fluxW, flux_dual)
+    # new_massq = remap_density!(mgr, scheme_mq, new.massq, #==# fluxq, slope, q, #==# massq, mass, flux)
+    new_W = remap_density!(mgr, density, new.W, #==# fluxW, slopeW, w, #==# W, mass_dual, flux_dual)
+    new_mass = update_mass!(mgr, new.mass, #==# new_mass)
+    # return
+    tmp = (; flux, new_mass, fluxq, slope, mass_dual, flux_dual, fluxW, slopeW, w)
+    return (mass=new_mass, W=new_W, q=new_q, ux=new_ux, uy=new_uy, p_NH=new_p_NH), tmp
+end
+
+# p_NH => geopot
+function NH_geopotential!((Phi, p_hydro), mgr, gas, ptop, mass, p_NH, consvar)
+    volume = gas(:p, :consvar).specific_volume
+    nz = size(p_NH, 2)
+    @with mgr let irange=axes(p_NH, 1)
+        # mass is per unit area, includes gravity => same unit as pressure, as in HPE
+        @vec for i in irange
+            p_hydro[i, nz] = ptop + mass[i, nz] / 2
+        end
+        for k in nz-1:-1:1
+            @vec for i in irange
+                p_hydro[i, k] = p_hydro[i, k+1] + (mass[i, k] + mass[i, k+1])/2
+            end
+        end
+        # Phi[:,1] is already set
+        for k in axes(mass,2)
+            @vec for i in irange
+                vol = volume(p_hydro[i,k] + p_NH[i,k], consvar[i,k])
+                Phi[i,k+1] = Phi[i,k] + mass[i,k]*vol
+            end
+        end
+    end
+    return nothing
+end
+
+# horizontal momentum, weight => covariant momentum, mass
+function horiz_to_cov!((mass, massq, W, ux, uy), mgr, metric, new_mass, new_ux, new_uy, new_q, new_W, (Phi_x, Phi_y))
+    @with mgr let (irange, krange) = axes(W)
+        for i in irange, k in krange
+            W[i,k] = new_W[i,k]
+        end
+    end
+    @with mgr let (irange, krange) = axes(mass)
+        for k in krange
+            for i in irange 
+                mass[i,k] = metric*new_mass[i,k]
+                massq[i,k] = mass[i,k] * new_q[i,k]
+            end 
+            for (ui, Phi_i) in ((ux, Phi_x), (uy, Phi_y))
+                for i in irange
+                    ui[i, k] += (Phi_i[i, k] * W[i, k] +
+                                Phi_i[i, k + 1] * W[i, k + 1]) /
+                               (2 * mass[i, k])
+                end
+            end # (ux,uy)
+        end # k
+    end # let
+end
+
+#=
 
 using ..CFCompressible.Dynamics: scalar_fields!
 
@@ -85,5 +220,6 @@ function remap!(new, tmp, mgr, vcoord, Jac, layout, schemes, now)
     new_uy = remap_scalar!(mgr, scheme_u, new.uy, #==# tmp.fluxq, tmp.slope, #==# uy, mass, flux)
     new = (; mass=new_mass, q=new_q, NHvol=new_NHvol, ux=new_ux, uy=new_uy)
 end
+=#
 
 end # module

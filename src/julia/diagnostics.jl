@@ -108,7 +108,7 @@ function hydrostatic_pressure(model, masses)
         nz = size(p, 3)
         for j in jrange
             @vec for i in irange
-                p[i, j, nz] = ptop + mass[i, j, nz] / 2
+                p[i, j, nz] = ptop + mass[i, j, nz] *(gravity/2)
                 for k in nz:-1:2
                     p[i, j, k - 1] = p[i, j, k] + (mass[i, j, k] + mass[i, j, k - 1]) * (gravity/2)
                 end

@@ -76,6 +76,20 @@ tendencies!(slow, fast, scratch, model::FCE, state, _, tau) = FCE_tendencies!(sl
 """
 tendencies!(dstate, scratch, model::FC2D, state, t) = BoxDynamics.FC2D_tendencies!(dstate, scratch, model, state, t)
 
+# vertical remap
+"""
+    tmp = vertical_remap!(state, model::FCE, void) # first call
+    vertical_remap!(state, model::FCE, tmp)        # subsequent calls
+
+Apply vertical remap to `state`. After this remap, `state` 
+conforms to the vertical coordinate defined by `model.vcoord`.
+
+If scratch space `tmp` is `::Void`, then `new_tmp` is a (nested)
+named tuple of arrays that can be used as `tmp` in a future call.
+"""
+vertical_remap!(state, model::FCE, tmp) = vertical_remap_FCE!(state, model, model.domain.layer, tmp)
+function vertical_remap_FCE! end # implemented in `remap_spectral.jl`
+
 # specify initialization
 """
     (; m, u, w) = initialize(model::FC2D, params)
@@ -107,6 +121,8 @@ include("julia/vertical_dynamics.jl")
 include("julia/horizontal_energies.jl")
 include("julia/dynamics.jl")
 include("julia/voronoi_dynamics.jl")
+include("julia/remap_collocated.jl")
+include("julia/remap_spectral.jl")
 include("julia/NH_state.jl")
 include("julia/diagnostics.jl")
 

@@ -134,6 +134,11 @@ energies!(energies, state, model::FC2D) = BoxEnergetics.energies!(energies, stat
 # specify diagnostics for each model
 diagnostics(::FCE) = Diagnostics.diagnostics_FCE()
 diagnostics(::FC2D) = Diagnostics.diagnostics_FC2D()
+internal_diagnostics(::FC2D) = Diagnostics.internal_diagnostics_FC2D()
+diagnostic_info(::FC2D) = Diagnostics.diagnostic_info_FC2D()
+describe_diagnostics(model::FC2D) = foreach(pairs(diagnostic_info(model))) do (name, (; long_name, units))
+    println(rpad(name, 34), rpad(long_name, 52), units)
+end
 
 # include("julia/lazy_broadcast.jl")
 

@@ -15,11 +15,11 @@ function FC2D_tendencies!(dstate, scratch, model::FC2D, state, t)
     # fill the halo of the state (never its interior) from the boundary conditions
     state = state_bc!(model, state)
 
-    ## THERMODYNAMICS, pointwise on all cells: p, consvar, q, T, conjvar, chempot, Cp, ∂consvar/∂q, Γ_pq, B
-    (; p, consvar, comp, T, conjvar, chempot, Cp, ∂cons_∂q, Γ_pq) = scratch.thermo
+    ## THERMODYNAMICS, pointwise on all cells: p, consvar, q, T, conjvar, chempot, Cp, ∂consvar/∂q, Γ, B
+    (; p, consvar, q, T, conjvar, chempot, Cp, ∂consvar_∂q, Γ) = scratch.thermo
     (; B) = scratch.momentum
-    p, consvar, comp, T, conjvar, chempot, Cp, ∂cons_∂q, Γ_pq, B =
-        thermodynamics!((p, consvar, comp, T, conjvar, chempot, Cp, ∂cons_∂q, Γ_pq, B), model, state)
+    p, consvar, q, T, conjvar, chempot, Cp, ∂consvar_∂q, Γ, B =
+        thermodynamics!((p, consvar, q, T, conjvar, chempot, Cp, ∂consvar_∂q, Γ, B), model, state)
 
     ## VELOCITY DERIVATIVES; ∂u_x, ∂w_z, ∂u/∂z, ∂w/∂x
     (; ∂u_x, ∂w_z, ∂u_z, ∂w_x) = scratch.derivatives
@@ -49,7 +49,7 @@ function FC2D_tendencies!(dstate, scratch, model::FC2D, state, t)
 
     Jcons_x, Jcons_z, Jq_x, Jq_z, Jcons∂conj_∂x, Jcons∂conj_∂z, Jq∂chem_∂x, Jq∂chem_∂z =
         fluxes!((Jcons_x, Jcons_z, Jq_x, Jq_z, Jcons∂conj_∂x, Jcons∂conj_∂z, Jq∂chem_∂x, Jq∂chem_∂z), model, model.thermoflux, state,
-                (consvar, comp, conjvar, chempot, p, T, Cp, ∂cons_∂q, Γ_pq))
+                (consvar, q, conjvar, chempot, p, T, Cp, ∂consvar_∂q, Γ))
 
     # ENTROPY PRODUCTION
     (; σ_cons) = scratch.irreversible
@@ -59,7 +59,7 @@ function FC2D_tendencies!(dstate, scratch, model::FC2D, state, t)
     # UPDATE DSTATE
     dm, du, dw  = (dstate.m, dstate.u, dstate.w)
 
-    du, dw  = duw!((du, dw), model, state, (B_x, B_z, ∂K_x, ∂K_z, ωw, ωu, visc_scratch[3], visc_scratch[4]))
+    du, dw  = velocity_tendencies!((du, dw), model, state, (B_x, B_z, ∂K_x, ∂K_z, ωw, ωu, visc_scratch[3], visc_scratch[4]))
     dm      = dm!(dm, model, state, (mu, mw, Jcons_x, Jcons_z, Jq_x, Jq_z, σ_cons))
 
     dstate = (m = dm, u = du, w = dw)
@@ -70,7 +70,7 @@ function FC2D_tendencies!(dstate, scratch, model::FC2D, state, t)
 
     scratch = (
         momentum        = (; B_x, B_z, B),
-        thermo          = (; consvar, comp, conjvar, chempot, p, T, Cp, ∂cons_∂q, Γ_pq),
+        thermo          = (; consvar, q, conjvar, chempot, p, T, Cp, ∂consvar_∂q, Γ),
         derivatives     = (; ∂u_x, ∂w_z, ∂u_z, ∂w_x),
         irreversible    = (; ρε, visc_scratch, Jcons_x, Jcons_z, Jq_x, Jq_z, σ_cons, Jcons∂conj_∂x, Jcons∂conj_∂z, Jq∂chem_∂x, Jq∂chem_∂z),
         advection       = (; mu, mw, K, ∂K_x, ∂K_z, ωw, ωu, adv_scratch),
@@ -271,7 +271,7 @@ end
 ## VISCOUS DISSIPATION
 
 # Viscous force on faces, F = ∇·τ (per unit volume), and the dissipation ρε = ∇·(u·τ) - u·F at cell centres. F is
-# used again by the momentum tendencies (`duw!`), so that the viscous derivatives are formed once.
+# used again by the momentum tendencies (`velocity_tendencies!`), so that the viscous derivatives are formed once.
 function viscous_dissipation!((ρε_, (uτ_x_, uτ_z_, F_x_, F_z_)), model, (; m, u, w), (∂u_x, ∂w_z, ∂u_z, ∂w_x))
     (; mgr, domain, inv_dx, inv_dz) = model
     (; dyn_visc, bulk_visc) = model.viscosity
@@ -324,39 +324,40 @@ end
 
 # All pointwise thermodynamics, in one pass over all cells (halo included, valid after `state_bc!`): from
 # m = (ρ, ρ consvar, ρ q), the pressure p(v, consvar, q), the temperature, the conjugate variable and modified
-# chemical potential, Cp, ∂consvar/∂q, Γ_pq = -∂μ/∂p / ∂μ/∂q (barodiffusion) and B = h - conjvar consvar - chempot q.
-function thermodynamics!((p_, consvar_, comp_, T_, conjvar_, chempot_, Cp_, ∂cons_∂q_, Γ_pq_, B_), model::FC2D, (; m))
+# chemical potential, Cp, ∂consvar/∂q, Γ = -∂μ/∂p / ∂μ/∂q (barodiffusion, per unit pressure) and
+# B = h - conjvar consvar - chempot q.
+function thermodynamics!((p_, consvar_, q_, T_, conjvar_, chempot_, Cp_, ∂consvar_∂q_, Γ_, B_), model::FC2D, (; m))
     (; mgr, fluid) = model
 
-    p        = similar!(p_, m, size(m)[1:2]...)
-    consvar  = similar!(consvar_, p)
-    comp     = similar!(comp_, p)
-    T        = similar!(T_, p)
-    conjvar  = similar!(conjvar_, p)
-    chempot  = similar!(chempot_, p)
-    Cp       = similar!(Cp_, p)
-    ∂cons_∂q = similar!(∂cons_∂q_, p)
-    Γ_pq     = similar!(Γ_pq_, p)
-    B        = similar!(B_, p)
+    p           = similar!(p_, m, size(m)[1:2]...)
+    consvar     = similar!(consvar_, p)
+    q           = similar!(q_, p)
+    T           = similar!(T_, p)
+    conjvar     = similar!(conjvar_, p)
+    chempot     = similar!(chempot_, p)
+    Cp          = similar!(Cp_, p)
+    ∂consvar_∂q = similar!(∂consvar_∂q_, p)
+    Γ           = similar!(Γ_, p)
+    B           = similar!(B_, p)
 
     @with mgr, let (irange, jrange) = (axes(m, 1), axes(m, 2))
         @vec for i in irange, j in jrange
-            v              = inv(m[i, j, 1])
-            cons, q        = m[i, j, 2] * v, m[i, j, 3] * v
-            pij            = fluid(:v, :consvar, :q).pressure(v, cons, q)
-            Tij            = fluid(:p, :consvar, :q).temperature(pij, cons, q)
-            conj           = fluid(:p, :consvar, :q).conjugate_variable(pij, cons, q)
-            chem           = fluid(:p, :consvar, :q).modified_chemical_potential(pij, cons, q)
-            _, ∂μ_∂p, _, ∂μ_∂q = fluid(:p, :T, :q).chemical_potential_derivatives(pij, Tij, q)
-            consvar[i, j], comp[i, j], p[i, j], T[i, j] = cons, q, pij, Tij
+            v                 = inv(m[i, j, 1])
+            cons, qij         = m[i, j, 2] * v, m[i, j, 3] * v
+            pij               = fluid(:v, :consvar, :q).pressure(v, cons, qij)
+            Tij               = fluid(:p, :consvar, :q).temperature(pij, cons, qij)
+            conj              = fluid(:p, :consvar, :q).conjugate_variable(pij, cons, qij)
+            chem              = fluid(:p, :consvar, :q).modified_chemical_potential(pij, cons, qij)
+            _, ∂μ_∂p, _, ∂μ_∂q = fluid(:p, :T, :q).chemical_potential_derivatives(pij, Tij, qij)
+            consvar[i, j], q[i, j], p[i, j], T[i, j] = cons, qij, pij, Tij
             conjvar[i, j], chempot[i, j] = conj, chem
-            Cp[i, j]       = fluid(:p, :consvar, :q).heat_capacity(pij, cons, q)
-            ∂cons_∂q[i, j] = fluid(:p, :consvar, :q).dcons_dq(pij, cons, q)
-            Γ_pq[i, j]     = - ∂μ_∂p / ∂μ_∂q
-            B[i, j]        = fluid(:p, :consvar, :q).specific_enthalpy(pij, cons, q) - conj * cons - chem * q
+            Cp[i, j]          = fluid(:p, :consvar, :q).heat_capacity(pij, cons, qij)
+            ∂consvar_∂q[i, j] = fluid(:p, :consvar, :q).dcons_dq(pij, cons, qij)
+            Γ[i, j]           = - ∂μ_∂p / ∂μ_∂q
+            B[i, j]           = fluid(:p, :consvar, :q).specific_enthalpy(pij, cons, qij) - conj * cons - chem * qij
         end
     end
-    return p, consvar, comp, T, conjvar, chempot, Cp, ∂cons_∂q, Γ_pq, B
+    return p, consvar, q, T, conjvar, chempot, Cp, ∂consvar_∂q, Γ, B
 end
 
 ## MOMENTUM FORCING
@@ -366,8 +367,8 @@ end
 # Shared by the tendencies and by the construction of discretely balanced states.
 @inline function face_forcing(inv_d, ρa, ra, qa, ρb, rb, qb, conj_a, chem_a, B_a, conj_b, chem_b, B_b)
     v = inv(ρa + ρb)
-    consvar, comp = (ra + rb) * v, (qa + qb) * v
-    return - inv_d * ((conj_b - conj_a) * consvar + (chem_b - chem_a) * comp + (B_b - B_a))
+    consvar, q = (ra + rb) * v, (qa + qb) * v
+    return - inv_d * ((conj_b - conj_a) * consvar + (chem_b - chem_a) * q + (B_b - B_a))
 end
 
 # (conjvar, chempot, B) in a cell with density ρ, conservative variable cons and composition q
@@ -412,7 +413,7 @@ end
 # pointwise formulas give the fluxes through walls with a prescribed `Value` (see `wall_flux`). The products
 # J ∂conjvar and Jq ∂chempot on faces, for the production σ, are formed in the same pass.
 function fluxes!((Jcons_x_, Jcons_z_, Jq_x_, Jq_z_, Jcons∂conj_∂x_, Jcons∂conj_∂z_, Jq∂chem_∂x_, Jq∂chem_∂z_), model::FC2D, thermoflux, (; m, u, w),
-                 (consvar, comp, conjvar, chempot, p, T, Cp, ∂cons_∂q, Γ_pq))
+                 (consvar, q, conjvar, chempot, p, T, Cp, ∂consvar_∂q, Γ))
     (; mgr, domain, inv_dx, inv_dz) = model
 
     Jcons_x = similar!(Jcons_x_, u)
@@ -428,8 +429,8 @@ function fluxes!((Jcons_x_, Jcons_z_, Jq_x_, Jq_z_, Jcons∂conj_∂x_, Jcons∂
     @with mgr, let (irange, jrange) = (Xrange(domain), axes(Jcons_x, 2))
         @vec for I in irange, j in jrange
             ρ_x           = avg_X(m1, I, j)
-            Jq            = salt_flux(thermoflux, ρ_x, avg_X(Γ_pq, I, j), inv_dx * dif_X(comp, I, j), inv_dx * dif_X(p, I, j))
-            Jcons         = consvar_flux(thermoflux, ρ_x, avg_X(Cp, I, j), inv_dx * dif_X(T, I, j), inv_dx * dif_X(consvar, I, j), Jq, avg_X(conjvar, I, j), avg_X(∂cons_∂q, I, j))
+            Jq            = salt_flux(thermoflux, ρ_x, avg_X(Γ, I, j), inv_dx * dif_X(q, I, j), inv_dx * dif_X(p, I, j))
+            Jcons         = consvar_flux(thermoflux, ρ_x, avg_X(Cp, I, j), inv_dx * dif_X(T, I, j), inv_dx * dif_X(consvar, I, j), Jq, avg_X(conjvar, I, j), avg_X(∂consvar_∂q, I, j))
             Jq_x[I, j], Jcons_x[I, j] = Jq, Jcons
             Jcons∂conj_∂x[I, j] = Jcons * inv_dx * dif_X(conjvar, I, j)
             Jq∂chem_∂x[I, j]    = Jq * inv_dx * dif_X(chempot, I, j)
@@ -438,15 +439,15 @@ function fluxes!((Jcons_x_, Jcons_z_, Jq_x_, Jq_z_, Jcons∂conj_∂x_, Jcons∂
     @with mgr, let (irange, jrange) = (axes(Jcons_z, 1), Zrange(domain))
         @vec for i in irange, J in jrange
             ρ_z           = avg_Z(m1, i, J)
-            Jq            = salt_flux(thermoflux, ρ_z, avg_Z(Γ_pq, i, J), inv_dz * dif_Z(comp, i, J), inv_dz * dif_Z(p, i, J))
-            Jcons         = consvar_flux(thermoflux, ρ_z, avg_Z(Cp, i, J), inv_dz * dif_Z(T, i, J), inv_dz * dif_Z(consvar, i, J), Jq, avg_Z(conjvar, i, J), avg_Z(∂cons_∂q, i, J))
+            Jq            = salt_flux(thermoflux, ρ_z, avg_Z(Γ, i, J), inv_dz * dif_Z(q, i, J), inv_dz * dif_Z(p, i, J))
+            Jcons         = consvar_flux(thermoflux, ρ_z, avg_Z(Cp, i, J), inv_dz * dif_Z(T, i, J), inv_dz * dif_Z(consvar, i, J), Jq, avg_Z(conjvar, i, J), avg_Z(∂consvar_∂q, i, J))
             Jq_z[i, J], Jcons_z[i, J] = Jq, Jcons
             Jcons∂conj_∂z[i, J] = Jcons * inv_dz * dif_Z(conjvar, i, J)
             Jq∂chem_∂z[i, J]    = Jq * inv_dz * dif_Z(chempot, i, J)
         end
     end
 
-    thermo = (; consvar, comp, conjvar, p, T, Cp, ∂cons_∂q, Γ_pq)
+    thermo = (; consvar, q, conjvar, p, T, Cp, ∂consvar_∂q, Γ)
     wall_fluxes!(model, thermoflux, m, thermo, ((Jcons_x, Jq_x), (Jcons_z, Jq_z)))
     foreach(a -> zero_walls!(domain, a, Val(1)), (Jcons∂conj_∂x, Jq∂chem_∂x))     # wall faces: see `entropy_production!`
     foreach(a -> zero_walls!(domain, a, Val(2)), (Jcons∂conj_∂z, Jq∂chem_∂z))
@@ -461,12 +462,12 @@ end
 # heat flux -ρ Cp k_T ∂T of the consistent scheme
 @inline heat_flux(hf::ThermoFluxConsistent, ρ, Cp, ∂T) = - ρ * Cp * hf.k_T * ∂T
 # flux of consvar carrying the heat flux JT: JT / conjvar, plus ∂consvar/∂q Jq in the consistent scheme
-@inline heat_to_consvar(::ThermoFluxConsistent, JT, Jq, conj, ∂cons_∂q) = JT / conj + ∂cons_∂q * Jq
-@inline heat_to_consvar(::ThermoFluxDowngradient, JT, Jq, conj, ∂cons_∂q) = JT / conj
+@inline heat_to_consvar(::ThermoFluxConsistent, JT, Jq, conj, ∂consvar_∂q) = JT / conj + ∂consvar_∂q * Jq
+@inline heat_to_consvar(::ThermoFluxDowngradient, JT, Jq, conj, ∂consvar_∂q) = JT / conj
 # flux of consvar: from the heat flux in the consistent scheme, down the gradient of consvar in the downgradient one
-@inline consvar_flux(hf::ThermoFluxConsistent, ρ, Cp, ∂T, ∂cons, Jq, conj, ∂cons_∂q) =
-    heat_to_consvar(hf, heat_flux(hf, ρ, Cp, ∂T), Jq, conj, ∂cons_∂q)
-@inline consvar_flux(hf::ThermoFluxDowngradient, ρ, Cp, ∂T, ∂cons, Jq, conj, ∂cons_∂q) = - ρ * hf.k_T * ∂cons
+@inline consvar_flux(hf::ThermoFluxConsistent, ρ, Cp, ∂T, ∂cons, Jq, conj, ∂consvar_∂q) =
+    heat_to_consvar(hf, heat_flux(hf, ρ, Cp, ∂T), Jq, conj, ∂consvar_∂q)
+@inline consvar_flux(hf::ThermoFluxDowngradient, ρ, Cp, ∂T, ∂cons, Jq, conj, ∂consvar_∂q) = - ρ * hf.k_T * ∂cons
 
 ## WALL FLUXES OF TRACERS
 
@@ -496,11 +497,11 @@ end
 # (+ ∂consvar/∂q Jq for the consistent scheme). The energy delivered by the wall is then exactly JT, and the irreversible production in the half cell between the wall and the cell
 # centre is contained in Jcons, so that the wall faces add nothing to the production σ (see `entropy_production!`).
 @inline function wall_flux(model, thermoflux, (cons_bc, q_bc), I, cell, n, d, g, m, thermo)
-    (; consvar, comp, conjvar, p, T, Cp, ∂cons_∂q, Γ_pq) = thermo
+    (; consvar, q, conjvar, p, T, Cp, ∂consvar_∂q, Γ) = thermo
     ρ = m[cell, 1]
     p_w = p[cell] + n * ρ * g * d
-    Jq = wall_flux(q_bc, thermoflux, I, n, d, ρ, Γ_pq[cell], comp[cell], n * (p[cell] - p_w) / d)
-    Jcons = wall_flux(cons_bc, model.fluid, thermoflux, I, n, d, ρ, comp[cell], p_w, T[cell], consvar[cell], conjvar[cell], Cp[cell], ∂cons_∂q[cell], Jq)
+    Jq = wall_flux(q_bc, thermoflux, I, n, d, ρ, Γ[cell], q[cell], n * (p[cell] - p_w) / d)
+    Jcons = wall_flux(cons_bc, model.fluid, thermoflux, I, n, d, ρ, q[cell], p_w, T[cell], consvar[cell], conjvar[cell], Cp[cell], ∂consvar_∂q[cell], Jq)
     return Jcons, Jq
 end
 
@@ -509,13 +510,13 @@ end
 @inline wall_flux(c::Value, hf, I, n, d, ρ, Γ, q, ∂p) = salt_flux(hf, ρ, Γ, n * (q - bc_value(c, I)) / d, ∂p)
 # consvar: prescribed flux of ρ consvar, prescribed heat flux, or the face flux with the wall value as neighbour,
 # with T_wall = T(p_wall, consvar_wall, q_cell)
-@inline wall_flux(c::Flux{V, :density}, fluid, hf, I, n, d, ρ, q, p_w, T, cons, conj, Cp, ∂cons_∂q, Jq) where V = n * bc_value(c, I)
-@inline wall_flux(c::Flux{V, :heat}, fluid, hf, I, n, d, ρ, q, p_w, T, cons, conj, Cp, ∂cons_∂q, Jq) where V =
-    heat_to_consvar(hf, n * bc_value(c, I), Jq, conj, ∂cons_∂q)
-@inline function wall_flux(c::Value, fluid, hf, I, n, d, ρ, q, p_w, T, cons, conj, Cp, ∂cons_∂q, Jq)
+@inline wall_flux(c::Flux{V, :density}, fluid, hf, I, n, d, ρ, q, p_w, T, cons, conj, Cp, ∂consvar_∂q, Jq) where V = n * bc_value(c, I)
+@inline wall_flux(c::Flux{V, :heat}, fluid, hf, I, n, d, ρ, q, p_w, T, cons, conj, Cp, ∂consvar_∂q, Jq) where V =
+    heat_to_consvar(hf, n * bc_value(c, I), Jq, conj, ∂consvar_∂q)
+@inline function wall_flux(c::Value, fluid, hf, I, n, d, ρ, q, p_w, T, cons, conj, Cp, ∂consvar_∂q, Jq)
     cons_w = bc_value(c, I)
     T_w = fluid(:p, :consvar, :q).temperature(p_w, cons_w, q)
-    return consvar_flux(hf, ρ, Cp, n * (T - T_w) / d, n * (cons - cons_w) / d, Jq, conj, ∂cons_∂q)
+    return consvar_flux(hf, ρ, Cp, n * (T - T_w) / d, n * (cons - cons_w) / d, Jq, conj, ∂consvar_∂q)
 end
 
 # Choice: the face terms J ∂conjvar and Jq ∂chempot of the production σ vanish on wall faces. Each face term is
@@ -543,7 +544,7 @@ entropy_production!(σ_cons_, model, thermoflux::ThermoFluxDowngradient, (conjva
 ## UPDATE DSTATE
 
 
-function duw!((du_, dw_), model::FC2D, (; m, u, w), (B_x, B_z, ∂K_x, ∂K_z, ωw, ωu, F_x, F_z))
+function velocity_tendencies!((du_, dw_), model::FC2D, (; m, u, w), (B_x, B_z, ∂K_x, ∂K_z, ωw, ωu, F_x, F_z))
     (; mgr, domain) = model
 
     du = similar!(du_, u)

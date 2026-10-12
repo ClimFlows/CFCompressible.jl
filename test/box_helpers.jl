@@ -206,15 +206,29 @@ function test_integration(model, state, dt, nsteps, cell_energies, conserved, ki
     return s
 end
 
-# every diagnostics recipe evaluates to a finite array
-function test_diagnostics(book, tend!, model, state)
+# every diagnostic (and every internal one) is finite on the full array, halo included, and has a long name and
+# units; s and θ follow the conservative variable for both choices of consvar
+function test_diagnostics((; book, internal, info), tend!, model, state, fluid_params)
     dstate, scratch = evaluate(tend!, model, state)
-    session = open(book; state = copy_state(state), dstate, scratch, model)
-    for sym in keys(getfield(book, :recipes))
-        @testset "$sym" begin
-            @test all(isfinite, CookBooks.get(session, sym))
+    for b in (book, internal)
+        session = open(b; state = copy_state(state), dstate, scratch, model)
+        for sym in keys(getfield(b, :recipes))
+            @testset "$sym" begin
+                @test all(isfinite, CookBooks.get(session, sym))
+            end
         end
+        close(session)
     end
+    @test issubset(keys(getfield(book, :recipes)), keys(info))
+    # consvar = θ for the test fluid; for a fluid with consvar = s, the same recipes give s = consvar and the same θ
+    session = open(book; state = copy_state(state), dstate, scratch, model)
+    p, θ, q = CookBooks.get(session, :pressure), CookBooks.get(session, :conservative_variable), CookBooks.get(session, :composition)
+    @test CookBooks.get(session, :potential_temperature) ≈ θ rtol = 1e-12
+    fluid_s = NonlinearBinaryFluid(:entropy, fluid_params)
+    s = fluid_s(:p, :theta, :q).conservative_variable.(p, θ, q)
+    recipes = getfield(book, :recipes)
+    @test recipes[:specific_entropy]((; fluid = fluid_s), p, s, q) ≈ s rtol = 1e-12
+    @test recipes[:potential_temperature]((; fluid = fluid_s), p, s, q) ≈ θ rtol = 1e-12
     close(session)
 end
 

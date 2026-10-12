@@ -2,8 +2,10 @@ module CFCompressible
 
 using CFHydrostatics: HPE
 using CFPlanets: ShallowTradPlanet, Tank2D
-using CFBoxes: Box2D, dims, AdvectionScheme, BoundaryConditions2D
-using CFDiffusionSchemes: HeatFluxScheme, ViscosityScheme
+import CFBoxes
+using CFBoxes: Box2D, dims, AdvectionScheme, BoxBoundaryConditions, discretize, check_tracers
+using CFDiffusionSchemes: ThermoFluxScheme, ViscosityScheme
+import CFTimeSchemes
 
 export FC2D
 
@@ -39,24 +41,26 @@ function FCE(model::HPE{F}, gravity::F, rhob, newton) where F
 end
 
 # fully compressible model for a 2D box geometry
-struct FC2D{F, Manager, Fluid}
+struct FC2D{F, Manager, Domain<:Box2D, Boundary<:BoxBoundaryConditions, Fluid, Advection<:AdvectionScheme, ThermoFlux<:ThermoFluxScheme{F}}
     mgr::Manager
-    domain::Box2D
+    domain::Domain
     space::Tank2D{F}
-    boundary::BoundaryConditions2D
+    boundary::Boundary
     fluid::Fluid
-    advection::AdvectionScheme
-    heatflux::HeatFluxScheme{F}
+    advection::Advection
+    thermoflux::ThermoFlux
     viscosity::ViscosityScheme{F}
     dx::F
     dz::F
     inv_dx::F
     inv_dz::F
 end
-function FC2D((; mgr, domain, space, fluid, advection_scheme, heatflux_scheme, viscosity_scheme, boundary_conditions))
+function FC2D((; mgr, domain, space, fluid, advection_scheme, thermoflux_scheme, viscosity_scheme, boundary_conditions))
     Mx, Mz = CFBoxes.dims(domain)
     dx, dz = space.Lx / Mx, space.Lz / Mz
-    return FC2D(mgr, domain, space, boundary_conditions, fluid, advection_scheme, heatflux_scheme, viscosity_scheme, dx, dz, 1/dx, 1/dz)
+    check_tracers(boundary_conditions, 2)       # tracers (consvar, q)
+    boundary = discretize(boundary_conditions, domain, (dx, dz))
+    return FC2D(mgr, domain, space, boundary, fluid, advection_scheme, thermoflux_scheme, viscosity_scheme, dx, dz, 1/dx, 1/dz)
 end
 
 # implemented in Dynamics
@@ -75,6 +79,7 @@ tendencies!(slow, fast, scratch, model::FCE, state, _, tau) = FCE_tendencies!(sl
     dstate, scratch = tendencies!(dstate, scratch, model, state, t)
 """
 tendencies!(dstate, scratch, model::FC2D, state, t) = BoxDynamics.FC2D_tendencies!(dstate, scratch, model, state, t)
+CFTimeSchemes.tendencies!(dstate, scratch, model::FC2D, state, t) = BoxDynamics.FC2D_tendencies!(dstate, scratch, model, state, t)
 
 # vertical remap
 """
@@ -92,24 +97,39 @@ function vertical_remap_FCE! end # implemented in `remap_spectral.jl`
 
 # specify initialization
 """
-    (; m, u, w) = initialize(model::FC2D, params)
-Initialize the state for the FC2D model.
+    (; m, u, w) = initialize(model::FC2D; density, consvar, q, velocity = nothing)
+    ρ = balanced_density(model::FC2D; consvar, q, ptop)
+    (u, w) = divergence_free_velocity(model::FC2D, ρ, ψ)
+
+Initial state of the FC2D model, in three steps: the rest density, a discretely divergence-free perturbation for
+it, then the state; see `BoxInitialize`.
 """
-initialize(model::FC2D, params) = BoxInitialize.initialize(model, params)
+initialize(model::FC2D; kwargs...) = BoxInitialize.initialize(model; kwargs...)
+balanced_density(model::FC2D; kwargs...) = BoxInitialize.balanced_density(model; kwargs...)
+divergence_free_velocity(model::FC2D, ρ, ψ) = BoxInitialize.divergence_free_velocity(model, ρ, ψ)
 
 # specify main time integration loop
 """
-    loop(model::FC2D, time_scheme, params; write_data = write_data, data_storage = nothing, plot_data = plot_data)
-Main time integration loop for the FC2D model.
+    state = loop(model::FC2D, state0, time_scheme, params; write_func, write_obj = nothing, plot_func, plot_obj = nothing)
+Main time integration loop for the FC2D model; returns the final state.
 - `model`: FC2D model instance
+- `state0`: initial state (see `initialize`)
 - `time_scheme`: time integration scheme
-- `params`: parameters dictionary
+- `params`: (; Nslice, slice_size, dt_max, cfl)
 - `write_func`: function to write data at each time slice
 - `write_obj`: object to pass to write_func (e.g., data storage)
 - `plot_func`: function to plot data at each time slice
 - `plot_obj`: object to pass to plot_func (e.g., plot storage)
 """
-loop(model::FC2D, time_scheme, params; kwargs...) = Loops.loop(model, time_scheme, params; kwargs...)
+loop(model::FC2D, state0, time_scheme, params; kwargs...) = Loops.loop(model, state0, time_scheme, params; kwargs...)
+
+# pointwise energies of FC2D
+"""
+    ke, pe, te = energies!((ke, pe, te), state, model::FC2D)
+
+Kinetic, potential + internal, and total energy per unit volume at cell centres; see `BoxEnergetics.energies!`.
+"""
+energies!(energies, state, model::FC2D) = BoxEnergetics.energies!(energies, state, model)
 
 # specify diagnostics for each model
 diagnostics(::FCE) = Diagnostics.diagnostics_FCE()
@@ -127,6 +147,8 @@ include("julia/NH_state.jl")
 include("julia/diagnostics.jl")
 
 include("julia/box_dynamics.jl")
+include("julia/box_initialize.jl")
+include("julia/box_energetics.jl")
 include("julia/loops.jl")
 
 end # module CFCompressible

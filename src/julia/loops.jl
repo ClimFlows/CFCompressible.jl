@@ -1,18 +1,16 @@
 module Loops
 
 import CFTimeSchemes: CFTimeSchemes, advance!, scratch_space
-using ..CFCompressible: FC2D
+using ..CFCompressible: FC2D, tendencies!, diagnostics
+using CFBoxes: xrange_interior, zrange_interior
 using MutatingOrNot: void, Void
 
 export loop
 
-function loop(model::FC2D{F}, time_scheme, params; write_func = write_func, write_obj = nothing, plot_func = plot_func, plot_obj = nothing) where {F}
+function loop(model::FC2D{F}, state0, time_scheme, params; write_func = write_func, write_obj = nothing, plot_func = plot_func, plot_obj = nothing) where {F}
     (; Nslice, slice_size, dt_max, cfl) = params
 
-    # initialise state
-    state0 = initialize(model, params)
-
-    # assign initial state
+    # copy the initial state
     state = deepcopy(state0)
 
     # create dstate and scratch space
@@ -48,6 +46,7 @@ function loop(model::FC2D{F}, time_scheme, params; write_func = write_func, writ
         # advance progress meter
         progress(t_iter, slice_size, Nslice * slice_size)
     end
+    return state
 end
 
 # empty write and plot functions
@@ -66,11 +65,16 @@ function cfl_condition(model::FC2D{F}, state, cfl, slice_size, dt_max) where {F}
     return dt_cfl, Nperslice
 end
 
-# compute maximum sound speed in the domain
-@inline function max_sound_speed((; m), model::FC2D)
-    c_func(ρ, cons, q) = fluid(:v, :consvar, :q).soundspeed(inv(ρ), cons, q)
-    c_func_m(m) = @views c_func.(m[:, :, 1], m[:, :, 2]./m[:, :, 1], m[:, :, 3]./m[:, :, 1])
-    return maximum(c_func_m(m))
+# maximum sound speed over the interior
+function max_sound_speed((; m), (; fluid, domain)::FC2D)
+    c2 = fluid(:v, :consvar, :q).sound_speed2
+    c2max = maximum(xrange_interior(domain)) do i
+        maximum(zrange_interior(domain)) do j
+            v = inv(m[i, j, 1])
+            c2(v, m[i, j, 2] * v, m[i, j, 3] * v)
+        end
+    end
+    return sqrt(c2max)
 end
 
 # simple progress meter

@@ -13,6 +13,7 @@ using SHTnsSpheres:
                     divergence!,
                     curl!
 using ManagedLoops: @with, @vec
+using CFBoxes: xrange_interior, zrange_interior, dif_x, dif_z
 
 using ..CFCompressible.Dynamics: FCE_tendencies!
 
@@ -148,59 +149,56 @@ end
 # Return a CookBook of diagnostic functions for the FC2D model.
 diagnostics_FC2D() = CookBook(;
     r           = state -> state.m[:, :, 1],
-    s           = state -> state.m[:, :, 2] ./ state.m[:, :, 1],
+    s           = state -> state.m[:, :, 2] ./ state.m[:, :, 1],   # conservative variable
     q           = state -> state.m[:, :, 3] ./ state.m[:, :, 1],
     u           = state -> state.u,
     w           = state -> state.w,
-    p           = scratch -> scratch.thermo.p,
-    T           = scratch -> scratch.thermo.T,
-    vorticity   = scratch -> scratch.derivatives.ω,
-    divu        = scratch -> scratch.derivatives.divu,
-    conjvar     = scratch -> scratch.thermo.conjvar,
-    chempot     = scratch -> scratch.thermo.chempot,
     rs          = state -> state.m[:, :, 2],
     rq          = state -> state.m[:, :, 3],
-    ωw          = scratch -> scratch.advection.ωw,
-    ωu          = scratch -> scratch.advection.ωu, 
-    Jcons_x     = scratch -> scratch.fluxes.Jcons_x,
-    Jcons_z     = scratch -> scratch.fluxes.Jcons_z,
-    Jq_x        = scratch -> scratch.fluxes.Jq_x,
-    Jq_z        = scratch -> scratch.fluxes.Jq_z,
-    ρε          = scratch -> scratch.viscous.ρε,
-    σ_cons      = scratch -> scratch.irreversible.σ_cons,
-    div_Jcons   = (scratch, model) -> div_diag(scratch.irreversible.Jcons_x, scratch.irreversible.Jcons_z, scratch, model),
-    div_Jq      = (scratch, model) -> div_diag(scratch.irreversible.Jq_x, scratch.irreversible.Jq_z, scratch, model),
-    div_ru      = (scratch, model) -> div_diag(scratch.advection.mu[:,:,1], scratch.advection.mw[:,:,1], scratch, model),
-    div_rsu     = (scratch, model) -> div_diag(scratch.advection.mu[:,:,2], scratch.advection.mw[:,:,1], scratch, model),
-    div_rqu     = (scratch, model) -> div_diag(scratch.advection.mu[:,:,3], scratch.advection.mw[:,:,2], scratch, model),
+    p           = scratch -> scratch.thermo.p,
+    T           = scratch -> scratch.thermo.T,
+    conjvar     = scratch -> scratch.thermo.conjvar,
+    chempot     = scratch -> scratch.thermo.chempot,
+    B           = scratch -> scratch.momentum.B,
     ∂u_x        = scratch -> scratch.derivatives.∂u_x,
     ∂w_z        = scratch -> scratch.derivatives.∂w_z,
     ∂u_z        = scratch -> scratch.derivatives.∂u_z,
     ∂w_x        = scratch -> scratch.derivatives.∂w_x,
-    dr          = dstate -> dstate.dm[:, :, 1],
-    drs         = dstate -> dstate.dm[:, :, 2],
-    drq         = dstate -> dstate.dm[:, :, 3],
-    du          = dstate -> dstate.du,
-    dw          = dstate -> dstate.dw,
-    B           = scratch -> scratch.thermo.B,
+    vorticity   = scratch -> scratch.derivatives.∂u_z .- scratch.derivatives.∂w_x,
+    divu        = scratch -> scratch.derivatives.∂u_x .+ scratch.derivatives.∂w_z,
     ke          = scratch -> scratch.advection.K,
-    ru          = scratch -> scratch.advection.mu[:,:,1],
-    rw          = scratch -> scratch.advection.mw[:,:,1],
-    su          = scratch -> scratch.advection.mu[:,:,2],
-    sw          = scratch -> scratch.advection.mw[:,:,2],
-    qu          = scratch -> scratch.advection.mu[:,:,3],
-    qw          = scratch -> scratch.advection.mw[:,:,3],
+    ωw          = scratch -> scratch.advection.ωw,
+    ωu          = scratch -> scratch.advection.ωu,
+    ru          = scratch -> scratch.advection.mu[:, :, 1],
+    rw          = scratch -> scratch.advection.mw[:, :, 1],
+    su          = scratch -> scratch.advection.mu[:, :, 2],
+    sw          = scratch -> scratch.advection.mw[:, :, 2],
+    qu          = scratch -> scratch.advection.mu[:, :, 3],
+    qw          = scratch -> scratch.advection.mw[:, :, 3],
+    Jcons_x     = scratch -> scratch.irreversible.Jcons_x,
+    Jcons_z     = scratch -> scratch.irreversible.Jcons_z,
+    Jq_x        = scratch -> scratch.irreversible.Jq_x,
+    Jq_z        = scratch -> scratch.irreversible.Jq_z,
+    ρε          = scratch -> scratch.irreversible.ρε,
+    σ_cons      = scratch -> scratch.irreversible.σ_cons,
+    div_Jcons   = (scratch, model) -> div_diag(scratch.irreversible.Jcons_x, scratch.irreversible.Jcons_z, model),
+    div_Jq      = (scratch, model) -> div_diag(scratch.irreversible.Jq_x, scratch.irreversible.Jq_z, model),
+    div_ru      = (scratch, model) -> div_diag(view(scratch.advection.mu, :, :, 1), view(scratch.advection.mw, :, :, 1), model),
+    div_rsu     = (scratch, model) -> div_diag(view(scratch.advection.mu, :, :, 2), view(scratch.advection.mw, :, :, 2), model),
+    div_rqu     = (scratch, model) -> div_diag(view(scratch.advection.mu, :, :, 3), view(scratch.advection.mw, :, :, 3), model),
+    dr          = dstate -> dstate.m[:, :, 1],
+    drs         = dstate -> dstate.m[:, :, 2],
+    drq         = dstate -> dstate.m[:, :, 3],
+    du          = dstate -> dstate.u,
+    dw          = dstate -> dstate.w,
 )
 
-function div_diag(Ax, Az, scratch, model)
-    (; domain, inv_dx, inv_dz) = model.environment
-    div_A = similar(scratch.derivatives.∂u_x)
-    @with mgr, let (irange, jrange) = (xrange(domain), zrange(domain))
-        @vec for i in irange, j in jrange                      
-            div_A[i, j] = inv_dx * dif_x(Ax, i, j) + inv_dz * dif_z(Az, i, j)
-        end       
+# divergence of a flux (Ax, Az) at cell centres; zero in the halo
+function div_diag(Ax, Az, (; domain, inv_dx, inv_dz))
+    div_A = zeros(eltype(Ax), size(Ax, 1), size(Az, 2) - 1)
+    for i in xrange_interior(domain), j in zrange_interior(domain)
+        div_A[i, j] = inv_dx * dif_x(Ax, i, j) + inv_dz * dif_z(Az, i, j)
     end
-    periodize!(model, div_A)
     return div_A
 end
 

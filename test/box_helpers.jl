@@ -29,13 +29,15 @@ copy_state(s) = map(copy, s)
 # ‖a - b‖∞ / ‖b‖∞
 relerr(a, b) = maximum(abs, a .- b) / max(maximum(abs, b), floatmin())
 
-# interior index ranges: cells, x-faces (u), z-faces incl. walls (w)
+# interior index ranges: cells, x-faces (u) and z-faces (w), including walls in bounded directions
 cells(d)  = (xrange_interior(d), zrange_interior(d))
-ufaces(d) = (xrange_interior(d), zrange_interior(d))
-wfaces(d) = (xrange_interior(d), first(zrange_interior(d)):last(zrange_interior(d))+1)
+ufaces(d) = (faces(boundary_topology(d)[1], xrange_interior(d)), zrange_interior(d))
+wfaces(d) = (xrange_interior(d), faces(boundary_topology(d)[2], zrange_interior(d)))
+faces(::Periodic, cells) = cells
+faces(::Bounded, cells) = first(cells):last(cells)+1
 
-# interior x-index of the cell/face east of interior index i, wrapping periodically (never reads the halo)
-east(d, i) = i == last(xrange_interior(d)) ? first(xrange_interior(d)) : i + 1
+# x-index of the face east of cell i, wrapping periodically (never reads the halo)
+east(d, i) = boundary_topology(d)[1] isa Periodic && i == last(xrange_interior(d)) ? first(xrange_interior(d)) : i + 1
 
 # periodic x-halo fill for any array whose first dimension is x (cells, u- or w-points)
 function fill_xhalo!(a, d)
@@ -95,7 +97,8 @@ end
 # tendencies from freshly allocated, zero-filled scratch: only the memory-safety test sees other contents
 evaluate(tend!, model, state) = with_fill(() -> tend!(model, void, void, copy_state(state)), 0.0)
 
-function test_memory_safety(tend!, model, state)
+# `reuse = false` skips the pass with reused dstate/scratch (same code, already covered by another configuration)
+function test_memory_safety(tend!, model, state; reuse = true)
     d = model.domain
     ref, _ = evaluate(tend!, model, state)
     ref = map(copy, ref)
@@ -107,8 +110,10 @@ function test_memory_safety(tend!, model, state)
     @test all(map(isequal, out, ref))
 
     # re-using dstate and scratch gives the same result
-    out2, _ = tend!(model, out, scratch, copy_state(state))
-    @test all(map(isequal, out2, ref))
+    if reuse
+        out2, _ = tend!(model, out, scratch, copy_state(state))
+        @test all(map(isequal, out2, ref))
+    end
 
     # the state interior is not modified (bitwise)
     @test s.m[cells(d)..., :] == state.m[cells(d)..., :]
@@ -124,26 +129,38 @@ function test_symmetries(tend!, model, state; tol = 1e-8)   # round-off from can
     @test tendency_mismatch(tendency(mirror_state(state, d)), mirror_state(ds, d), d) < tol
 end
 
+# the normal velocity stays zero on walls
 function test_walls(tend!, model, state; tol = 1e-12)
     d = model.domain
+    Bx, Bz = boundary_topology(d)
     dstate, _ = evaluate(tend!, model, state)
-    iw, jw = wfaces(d)
-    scale = max(maximum(abs, dstate.w[iw, jw]), floatmin())
-    @test maximum(abs, dstate.w[iw, first(jw)]) / scale < tol   # bottom wall face
-    @test maximum(abs, dstate.w[iw, last(jw)]) / scale < tol    # top wall face
+    if Bz isa Bounded
+        iw, jw = wfaces(d)
+        scale = max(maximum(abs, dstate.w[iw, jw]), floatmin())
+        @test maximum(abs, dstate.w[iw, first(jw)]) / scale < tol   # bottom wall
+        @test maximum(abs, dstate.w[iw, last(jw)]) / scale < tol    # top wall
+    end
+    if Bx isa Bounded
+        iu, ju = ufaces(d)
+        scale = max(maximum(abs, dstate.u[iu, ju]), floatmin())
+        @test maximum(abs, dstate.u[first(iu), ju]) / scale < tol   # left wall
+        @test maximum(abs, dstate.u[last(iu), ju]) / scale < tol    # right wall
+    end
 end
 
-# Σ dm over the interior vanishes for conserved densities, and equals Σ σ for the conservative variable
-function test_conservation(tend!, model, state, conserved, consvar; tol = 1e-12)
+# Σ dm over the interior equals the net inflow through the walls (zero for the mass), plus Σ σ for the
+# conservative variable; `tracers = (; mass, consvar, q)` gives their indices in m (mass = nothing if not prognostic)
+function test_conservation(tend!, model, state, (; mass, consvar, q); tol = 1e-12)
     d = model.domain
+    (ic, jc), (; dx, dz) = cells(d), model
     dstate, scratch = evaluate(tend!, model, state)
-    for k in conserved
-        dm = dstate.m[cells(d)..., k]
-        @test abs(sum(dm)) / sum(abs, dm) < tol
-    end
-    dm = dstate.m[cells(d)..., consvar]
-    σ = scratch.irreversible.σ_cons[cells(d)...]
-    @test abs(sum(dm) - sum(σ)) / (sum(abs, dm) + sum(abs, σ)) < tol
+    (; Jcons_x, Jcons_z, Jq_x, Jq_z, σ_cons) = scratch.irreversible
+    inflow(Jx, Jz) = sum(Jx[first(ic), j] - Jx[last(ic)+1, j] for j in jc) / dx + sum(Jz[i, first(jc)] - Jz[i, last(jc)+1] for i in ic) / dz
+    total(k) = sum(dstate.m[ic, jc, k])
+    scale(k) = sum(abs, dstate.m[ic, jc, k])
+    isnothing(mass) || @test abs(total(mass)) / scale(mass) < tol
+    @test abs(total(q) - inflow(Jq_x, Jq_z)) / scale(q) < tol
+    @test abs(total(consvar) - inflow(Jcons_x, Jcons_z) - sum(σ_cons[ic, jc])) / (scale(consvar) + sum(abs, σ_cons[ic, jc])) < tol
 end
 
 function test_energy(tend!, cell_energies, model, state; tol = 1e-10)
@@ -153,12 +170,16 @@ function test_energy(tend!, cell_energies, model, state; tol = 1e-10)
     return abs(total) / scale
 end
 
+# time and allocations of a tendencies! call, behind a function barrier (the arguments come from `evaluate`, whose
+# result type is not inferred: a dynamic call would box them)
+function measure(tend!, model, dstate, scratch, s)
+    tend!(model, dstate, scratch, s)
+    return (@elapsed tend!(model, dstate, scratch, s)), (@allocated tend!(model, dstate, scratch, s))
+end
+
 function test_no_allocations(tend!, model, state)
     dstate, scratch = evaluate(tend!, model, state)
-    s = copy_state(state)
-    tend!(model, dstate, scratch, s)
-    t = @elapsed tend!(model, dstate, scratch, s)
-    bytes = @allocated tend!(model, dstate, scratch, s)
+    t, bytes = measure(tend!, model, dstate, scratch, copy_state(state))
     @info "$(nameof(typeof(model))) tendencies!" time_ms = 1e3t bytes
     @test bytes == 0
 end
@@ -195,4 +216,39 @@ function test_diagnostics(book, tend!, model, state)
         end
     end
     close(session)
+end
+
+# energy input through the wall at side `s` (1 lower, 2 upper) of dimension `d`: thermal, Σ (conjvar Jcons + chempot Jq)
+# into the fluid, and mechanical, the work of the wall stress given by the viscous energy flux uτ on the wall faces
+function wall_input(model, scratch, d, s)
+    (; domain, dx, dz) = model
+    (; conjvar, chempot) = scratch.thermo
+    (; Jcons_x, Jcons_z, Jq_x, Jq_z, visc_scratch) = scratch.irreversible
+    (ic, jc) = cells(domain)
+    sign = s == 1 ? 1 : -1                                  # flux along +x/+z enters through the lower wall
+    if d == 1
+        I, i = s == 1 ? (first(ic), first(ic)) : (last(ic) + 1, last(ic))
+        heat = sum(conjvar[i, j] * Jcons_x[I, j] + chempot[i, j] * Jq_x[I, j] for j in jc) * dz
+        work = -sum(visc_scratch[1][I, j] for j in jc) * dz
+    else
+        J, j = s == 1 ? (first(jc), first(jc)) : (last(jc) + 1, last(jc))
+        heat = sum(conjvar[i, j] * Jcons_z[i, J] + chempot[i, j] * Jq_z[i, J] for i in ic) * dx
+        work = -sum(visc_scratch[2][i, J] for i in ic) * dx
+    end
+    return (; heat = sign * heat, work = sign * work)
+end
+
+# total energy input through all walls
+function total_wall_input(model, scratch)
+    walls = [(d, s) for d in 1:2 if boundary_topology(model.domain)[d] isa Bounded for s in 1:2]
+    return sum(((d, s),) -> sum(wall_input(model, scratch, d, s)), walls; init = 0.0)
+end
+
+# dE/dt equals the energy input through the walls (zero for closed walls), relative to Σ|per-cell dE/dt|
+function test_energy_budget(tend!, cell_energies, model, state; tol = 1e-12)
+    dstate, scratch = evaluate(tend!, model, state)
+    dE, scale = energy_tendency(cell_energies, model, state, dstate)
+    input = total_wall_input(model, scratch)
+    @test abs(dE - input) / scale < tol
+    return (; residual = abs(dE - input) / scale, input = input / scale)
 end

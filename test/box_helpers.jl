@@ -206,8 +206,8 @@ function test_integration(model, state, dt, nsteps, cell_energies, conserved, ki
     return s
 end
 
-# every diagnostic (and every internal one) is finite on the full array, halo included, and has a long name and
-# units; s and θ follow the conservative variable for both choices of consvar
+# every diagnostic (and every internal one) is finite on the full array, halo included, and has a long name, units
+# and grid location; s and θ follow the conservative variable for both choices of consvar
 function test_diagnostics((; book, internal, info), tend!, model, state, fluid_params)
     dstate, scratch = evaluate(tend!, model, state)
     for b in (book, internal)
@@ -220,6 +220,12 @@ function test_diagnostics((; book, internal, info), tend!, model, state, fluid_p
         close(session)
     end
     @test issubset(keys(getfield(book, :recipes)), keys(info))
+    # every diagnostic lies on its declared grid location
+    session = open(book; state = copy_state(state), dstate, scratch, model)
+    for sym in keys(getfield(book, :recipes))
+        @test size(CookBooks.get(session, sym)) == size(alloc(Float64, model.domain, info[sym].location))
+    end
+    close(session)
     # consvar = θ for the test fluid; for a fluid with consvar = s, the same recipes give s = consvar and the same θ
     session = open(book; state = copy_state(state), dstate, scratch, model)
     p, θ, q = CookBooks.get(session, :pressure), CookBooks.get(session, :conservative_variable), CookBooks.get(session, :composition)
@@ -230,7 +236,24 @@ function test_diagnostics((; book, internal, info), tend!, model, state, fluid_p
     @test recipes[:specific_entropy]((; fluid = fluid_s), p, s, q) ≈ s rtol = 1e-12
     @test recipes[:potential_temperature]((; fluid = fluid_s), p, s, q) ≈ θ rtol = 1e-12
     close(session)
+    # the computed diagnostics equal their direct formulas, and no recipe allocates (the book owns its outputs)
+    session = open(book; state, dstate, scratch, model)
+    (; ∂u_z, ∂w_x, ∂u_x, ∂w_z) = scratch.derivatives
+    (; Jcons_x, Jcons_z) = scratch.irreversible
+    ic, jc = cells(model.domain)
+    @test CookBooks.get(session, :vorticity) == ∂u_z .- ∂w_x
+    @test CookBooks.get(session, :divergence) == ∂u_x .+ ∂w_z
+    @test CookBooks.get(session, :div_Jcons)[ic, jc] ≈
+          [(Jcons_x[i+1, j] - Jcons_x[i, j]) / model.dx + (Jcons_z[i, j+1] - Jcons_z[i, j]) / model.dz for i in ic, j in jc]
+    for (sym, recipe) in recipes
+        args = map(name -> CookBooks.get(session, name), CookBooks.fun_arg_names(recipe))
+        @testset "$sym allocations" begin
+            @test allocations(recipe, args) == 0
+        end
+    end
+    close(session)
 end
+allocations(f::F, args::A) where {F, A} = (f(args...); @allocated f(args...))
 
 # energy input through the wall at side `s` (1 lower, 2 upper) of dimension `d`: thermal, Σ (conjvar Jcons + chempot Jq)
 # into the fluid, and mechanical, the work of the wall stress given by the viscous energy flux uτ on the wall faces

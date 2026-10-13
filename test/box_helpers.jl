@@ -2,10 +2,12 @@
 ##### Generic property checks shared by the anelastic and compressible tests
 #####
 
-# Fresh scratch arrays come from `MutatingOrNot.similar!(void, …)`. In the tests they are filled with
-# `ALLOC_FILL[]`, so that we can check that results never depend on the contents of new allocations.
+# Fresh scratch arrays come from `CFBoxes.alloc!(void, …)` (or `MutatingOrNot.similar!(void, …)`). In the tests they
+# are filled with `ALLOC_FILL[]`, so that we can check that results never depend on the contents of new allocations.
 const ALLOC_FILL = Ref(0.0)
 MutatingOrNot.similar!(::MutatingOrNot.Void, y...) = fill!(similar(y...), ALLOC_FILL[])
+CFBoxes.alloc!(::MutatingOrNot.Void, F::Type, box::CFBoxes.AbstractBox, location::Symbol, dims...) =
+    fill!(CFBoxes.alloc(F, box, location, dims...), ALLOC_FILL[])
 
 function with_fill(f, value)
     old = ALLOC_FILL[]

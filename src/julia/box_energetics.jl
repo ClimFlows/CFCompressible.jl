@@ -4,7 +4,6 @@ module BoxEnergetics
 using ..CFCompressible: FC2D
 using CFBoxes
 using ManagedLoops: @vec, @with
-using MutatingOrNot: similar!
 
 """
     ke, pe, te = energies!((ke, pe, te), state, model::FC2D)
@@ -13,18 +12,18 @@ Energies per unit volume (J m⁻³) at cell centres: kinetic ke = ρ (⟨u²⟩�
 pe = ρ (e + Φ) with e = h - p v the specific internal energy and Φ = g (z - Lz), and total te = ke + pe.
 Their sum over the interior, times Δx Δz, is the energy conserved by the energy-consistent schemes.
 """
-function energies!((ke_, pe_, te_), state, model::FC2D)
+function energies!((ke_, pe_, te_), state, model::FC2D{F}) where {F}
     ke = kinetic_energy!(ke_, state, model)
     pe = potential_energy!(pe_, state, model)
-    te = similar!(te_, ke)
+    te = alloc!(te_, F, model.domain, :xz)
     @. te = ke + pe
     return ke, pe, te
 end
 
 # KE = ρ (⟨u²⟩ₓ + ⟨w²⟩_z) / 2
-function kinetic_energy!(ke_, (; m, u, w), model::FC2D)
+function kinetic_energy!(ke_, (; m, u, w), model::FC2D{F}) where {F}
     (; mgr, domain) = model
-    ke = similar!(ke_, m, size(m)[1:2]...)
+    ke = alloc!(ke_, F, domain, :xz)
     @with mgr, let (irange, jrange) = (xrange(domain), zrange(domain))
         @vec for i in irange, j in jrange
             ke[i, j] = 0.5 * m[i, j, 1] * (avg_x(abs2, u, i, j) + avg_z(abs2, w, i, j))
@@ -35,10 +34,10 @@ function kinetic_energy!(ke_, (; m, u, w), model::FC2D)
 end
 
 # PE = ρ (h(p, consvar, q) - p v + Φ), with p = p(v, consvar, q)
-function potential_energy!(pe_, (; m), model::FC2D)
+function potential_energy!(pe_, (; m), model::FC2D{F}) where {F}
     (; mgr, domain, fluid, space, dz) = model
     (; g, Lz) = space
-    pe = similar!(pe_, m, size(m)[1:2]...)
+    pe = alloc!(pe_, F, domain, :xz)
     @with mgr, let (irange, jrange) = (axes(pe, 1), axes(pe, 2))
         @vec for i in irange, j in jrange
             v = inv(m[i, j, 1])

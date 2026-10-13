@@ -1,9 +1,9 @@
 module Loops
 
-import CFTimeSchemes: CFTimeSchemes, advance!, scratch_space
+import CFTimeSchemes: CFTimeSchemes, IVPSolver, advance!, scratch_space, max_time_step
 using ..CFCompressible: FC2D, tendencies!, diagnostics
 using CFBoxes: xrange_interior, zrange_interior
-using MutatingOrNot: void, Void
+using MutatingOrNot: void
 
 export loop
 
@@ -27,23 +27,17 @@ function loop(model::FC2D{F}, state0, time_scheme, params; outputs = nothing) wh
         # record the initial state
         record_outputs(outputs, model, state, dstate, scratch, book, t)
 
-        # initialise solver
+        # scratch space of the time scheme
         solver_scratch = scratch_space(time_scheme, state0, t)
-        solver = MutIVPSolver(dt_max, time_scheme, solver_scratch)
 
         # run loop
         for t_iter = 1:Nslice
-            # determine dt from CFL condition
-            dt, Nperslice = cfl_condition(model, state, cfl, slice_size, dt_max)
-        
-            # update solver with new dt
-            solver.dt = dt
+            # time step from the CFL condition, and a solver with that time step
+            dt, Nperslice = cfl_condition(model, time_scheme, state, cfl, slice_size, dt_max)
+            solver = IVPSolver(dt, time_scheme, solver_scratch)
 
             # advance state
             state, t = advance!(state, solver, state, t, Nperslice)
-
-            # compute dstate and scratch space at new time
-            dstate, scratch = tendencies!(dstate, scratch, model, state, t)
 
             # record the state at the end of the slice
             record_outputs(outputs, model, state, dstate, scratch, book, t)
@@ -57,22 +51,66 @@ function loop(model::FC2D{F}, state0, time_scheme, params; outputs = nothing) wh
     return state
 end
 
-# call and close the outputs, if any
-record_outputs(outputs, args...) = outputs(args...)
+# call the outputs, if any, with the tendencies and scratch at time t, and close them
+function record_outputs(outputs, model, state, dstate, scratch, book, t)
+    dstate, scratch = tendencies!(dstate, scratch, model, state, t)
+    return outputs(model, state, dstate, scratch, book, t)
+end
 record_outputs(::Nothing, args...) = nothing
 close_outputs(outputs) = close(outputs)
 close_outputs(::Nothing) = nothing
 
-# CFL condition for FC2D model
-function cfl_condition(model::FC2D{F}, state, cfl, slice_size, dt_max) where {F}
-    (; domain, dx, dz) = model
-    max_u       = maximum(abs, state.u[xrange_interior(domain), zrange_interior(domain)]) + 1e-99
-    max_w       = maximum(abs, state.w[xrange_interior(domain), zrange_interior(domain)]) + 1e-99
-    max_c       = max_sound_speed(state, model)
-    dt_cfl      = min(cfl * dx / (max_u + max_c), cfl * dz / (max_w + max_c), slice_size, dt_max)
-    Nperslice   = ceil(Int, slice_size / dt_cfl)
-    dt_cfl      = slice_size / Nperslice
-    return dt_cfl, Nperslice
+"""
+    dt, Nperslice = cfl_condition(model::FC2D, scheme, state, cfl, slice_size, dt_max)
+
+Return the time step `dt` [s] and the number `Nperslice` of steps per time slice: the largest `dt` that fits a whole
+number of times in `slice_size` [s] and is at most `dt_max` [s] and `cfl` times the stability limit of the explicit
+`scheme` (`CFTimeSchemes.max_time_step`) for the fastest discrete frequency `max_frequency(model, state)`. `cfl` is a
+fraction of that limit: `cfl ≤ 1` is stable for any explicit scheme.
+"""
+function cfl_condition(model::FC2D{F}, scheme, state, cfl, slice_size, dt_max) where {F}
+    dt        = min(cfl * max_time_step(scheme, inv(max_frequency(model, state))), slice_size, dt_max)
+    Nperslice = ceil(Int, slice_size / dt)
+    return slice_size / Nperslice, Nperslice
+end
+
+"""
+    ω = max_frequency(model::FC2D, state)
+
+Return an upper bound `ω` [s⁻¹] on the fastest discrete frequency of the state over the interior, the sum of:
+- advection, centred on the C-grid: max|u|/dx + max|w|/dz;
+- sound, on the C-grid (ω² = c² (4/dx² sin²(k dx/2) + 4/dz² sin²(m dz/2))): 2 max(c) √(1/dx² + 1/dz²);
+- diffusion: 4 max(ν, k_T, k_q) (1/dx² + 1/dz²), with ν = (μ + μ_b) / min(ρ);
+- internal gravity waves (ω = N |kₓ|/|k| ≤ N): max(N), see `max_buoyancy_frequency`.
+"""
+function max_frequency(model::FC2D{F}, state) where {F}
+    (; m, u, w) = state
+    (; domain, dx, dz, viscosity, thermoflux) = model
+    irange, jrange = xrange_interior(domain), zrange_interior(domain)
+    inv_d2         = inv(dx^2) + inv(dz^2)
+    advection      = maximum(abs, view(u, irange, jrange)) / dx + maximum(abs, view(w, irange, jrange)) / dz
+    sound          = 2 * max_sound_speed(state, model) * sqrt(inv_d2)
+    ν              = (viscosity.dyn_visc + viscosity.bulk_visc) / minimum(view(m, irange, jrange, 1))
+    diffusion      = 4 * max(ν, thermoflux.k_T, thermoflux.k_q) * inv_d2
+    return advection + sound + diffusion + max_buoyancy_frequency(model, m) + floatmin(F)
+end
+
+# max(N) over the w-faces J between interior cells J-1 and J, N² = g (α ∂consvar/∂z - β ∂q/∂z), with
+# α = ∂v/∂consvar / v and β = -∂v/∂q / v at the face (mean pressure, consvar and q of the two cells);
+# N² < 0 (static instability) does not oscillate and gives 0
+function max_buoyancy_frequency((; fluid, domain, space, dz)::FC2D{F}, m) where {F}
+    pressure, volume_functions = fluid(:v, :consvar, :q).pressure, fluid(:p, :consvar, :q).volume_functions
+    irange, jrange = xrange_interior(domain), zrange_interior(domain)
+    N2max = zero(F)
+    for J in first(jrange)+1:last(jrange), i in irange
+        v_1, v_2       = inv(m[i, J-1, 1]), inv(m[i, J, 1])
+        cons_1, cons_2 = m[i, J-1, 2] * v_1, m[i, J, 2] * v_2
+        q_1, q_2       = m[i, J-1, 3] * v_1, m[i, J, 3] * v_2
+        p = (pressure(v_1, cons_1, q_1) + pressure(v_2, cons_2, q_2)) / 2
+        v, _, ∂v_∂cons, ∂v_∂q = volume_functions(p, (cons_1 + cons_2) / 2, (q_1 + q_2) / 2)
+        N2max = max(N2max, space.g * (∂v_∂cons * (cons_2 - cons_1) + ∂v_∂q * (q_2 - q_1)) / (v * dz))
+    end
+    return sqrt(N2max)
 end
 
 # maximum sound speed over the interior
@@ -92,24 +130,6 @@ function progress(t_iter, slice_size, total_time)
     seconds = round(t_iter*slice_size; digits=2)
     print("\rProgress: $seconds / $total_time s", " " ^ 10)
     flush(stdout)       
-end
-
-# mutable solver based on CFTimeSchemes IVPSolver
-mutable struct MutIVPSolver{F, Scheme, Scratch}
-    dt::F               # time step
-    scheme::Scheme
-    scratch::Scratch    # scratch space, or void
-end
-
-# extension of CFTimeSchemes.advance! to handle mutable solver.
-function advance!(storage::Union{Void, State}, (; dt, scheme, scratch)::MutIVPSolver, state::State, t, N::Int) where State
-    @assert N>0
-    @assert typeof(t)==typeof(dt)
-    state = CFTimeSchemes.advance!(storage, scheme, state, t, dt, scratch)::State
-    for i=2:N
-        state = CFTimeSchemes.advance!(storage, scheme, state, t+(i-1)*dt, dt, scratch)::State
-    end
-    return state, t+N*dt
 end
 
 end # module Loops

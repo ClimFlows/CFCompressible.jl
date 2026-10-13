@@ -115,7 +115,9 @@ Main time integration loop for the FC2D model; returns the final state.
 - `model`: FC2D model instance
 - `state0`: initial state (see `initialize`)
 - `time_scheme`: time integration scheme
-- `params`: (; Nslice, slice_size, dt_max, cfl)
+- `params`: (; Nslice, slice_size, dt_max, cfl): `Nslice` time slices of `slice_size` [s], each split into equal
+  steps of at most `dt_max` [s] and `cfl` (≤ 1 for stability) times the stability limit of `time_scheme`, see
+  `cfl_condition`
 - `outputs`: callable `outputs(model, state, dstate, scratch, book, t)`, called at t = 0 and at the end of each
   time slice, with the diagnostics `book` and the time `t` [s] (e.g. to record diagnostics), then closed with
   `close(outputs)` when the run ends, even on error; `nothing` records nothing

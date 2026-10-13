@@ -7,54 +7,61 @@ using MutatingOrNot: void, Void
 
 export loop
 
-function loop(model::FC2D{F}, state0, time_scheme, params; write_func = write_func, write_obj = nothing, plot_func = plot_func, plot_obj = nothing) where {F}
+function loop(model::FC2D{F}, state0, time_scheme, params; outputs = nothing) where {F}
     (; Nslice, slice_size, dt_max, cfl) = params
 
     # copy the initial state
     state = deepcopy(state0)
 
-    # create dstate and scratch space
-    dstate, scratch = tendencies!(void, void, model, state, nothing)
-
-    # diagnostics, built once: the book owns the output arrays of its computed diagnostics
-    book = diagnostics(model)
-    
     # initialise time
     t = zero(F)
 
-    # initialise solver
-    solver_scratch = scratch_space(time_scheme, state0, t)
-    solver = MutIVPSolver(dt_max, time_scheme, solver_scratch)
+    # create dstate and scratch space
+    dstate, scratch = tendencies!(void, void, model, state, t)
 
-    # run loop
-    for t_iter = 1:Nslice
-        # determine dt from CFL condition
-        dt, Nperslice = cfl_condition(model, state, cfl, slice_size, dt_max)
+    # diagnostics, built once: the book owns the output arrays of its computed diagnostics
+    book = diagnostics(model)
+
+    # the outputs are closed when the run ends, even on error
+    try
+        # record the initial state
+        record_outputs(outputs, model, state, dstate, scratch, book, t)
+
+        # initialise solver
+        solver_scratch = scratch_space(time_scheme, state0, t)
+        solver = MutIVPSolver(dt_max, time_scheme, solver_scratch)
+
+        # run loop
+        for t_iter = 1:Nslice
+            # determine dt from CFL condition
+            dt, Nperslice = cfl_condition(model, state, cfl, slice_size, dt_max)
         
-        # update solver with new dt
-        solver.dt = dt
+            # update solver with new dt
+            solver.dt = dt
 
-        # advance state
-        state, t = advance!(state, solver, state, t, Nperslice)
+            # advance state
+            state, t = advance!(state, solver, state, t, Nperslice)
 
-        # compute dstate and scratch space at new time
-        dstate, scratch = tendencies!(dstate, scratch, model, state, t)
+            # compute dstate and scratch space at new time
+            dstate, scratch = tendencies!(dstate, scratch, model, state, t)
 
-        # write data
-        write_obj = write_func(model, state, dstate, scratch, book, write_obj, t_iter, params)
+            # record the state at the end of the slice
+            record_outputs(outputs, model, state, dstate, scratch, book, t)
 
-        # plot data
-        plot_obj = plot_func(model, state, dstate, scratch, book, plot_obj, t_iter, params)
-
-        # advance progress meter
-        progress(t_iter, slice_size, Nslice * slice_size)
+            # advance progress meter
+            progress(t_iter, slice_size, Nslice * slice_size)
+        end
+    finally
+        close_outputs(outputs)
     end
     return state
 end
 
-# empty write and plot functions
-function write_func(model, state, dstate, scratch, cookbook, write_obj, t_iter, params) end
-function plot_func(model, state, dstate, scratch, cookbook, plot_obj, t_iter, params) end
+# call and close the outputs, if any
+record_outputs(outputs, args...) = outputs(args...)
+record_outputs(::Nothing, args...) = nothing
+close_outputs(outputs) = close(outputs)
+close_outputs(::Nothing) = nothing
 
 # CFL condition for FC2D model
 function cfl_condition(model::FC2D{F}, state, cfl, slice_size, dt_max) where {F}

@@ -1,7 +1,7 @@
 module BoxInitialize
 
 using ..CFCompressible: FC2D
-using ..CFCompressible.BoxDynamics: state_bc!, face_forcing, cell_thermo
+using ..CFCompressible.BoxDynamics: state_bc!
 using CFBoxes
 
 export initialize, balanced_density, divergence_free_velocity
@@ -22,7 +22,7 @@ function initialize(model::FC2D{F}; density, consvar, q, velocity = nothing) whe
         ρ = density[i, j]
         m[i, j, 1], m[i, j, 2], m[i, j, 3] = ρ, ρ * consvar(x(i), z(j)), ρ * q(x(i), z(j))
     end
-    mirror_halo!(domain, m)
+    fill_halo!(m, domain, ZeroGradient())
     u, w = initial_velocity(velocity, F, domain)
     return state_bc!(model, (; m, u, w))
 end
@@ -34,7 +34,7 @@ initial_velocity(::Nothing, F, domain) = (fill!(alloc_Xz(F, domain), 0), fill!(a
 """
     ρ = balanced_density(model::FC2D; consvar, q, ptop)
 
-Density of the fluid at rest with the tracers consvar(x, z) and q(x, z), on all cells (halo mirrored): each column is
+Density of the fluid at rest with the tracers consvar(x, z) and q(x, z), on all cells (zero-gradient halo): each column is
 in discrete hydrostatic balance (the model's vertical momentum forcing vanishes on every interior face), with
 pressure `ptop` [Pa] in the top cell.
 """
@@ -50,7 +50,7 @@ function balanced_density(model::FC2D{F}; consvar, q, ptop) where F
         end
         ρ[i, :] .= balanced_column(model, cons_column, q_column, ptop, jc)
     end
-    return mirror_halo!(domain, ρ)
+    return fill_halo!(ρ, domain, ZeroGradient())
 end
 
 """
@@ -72,6 +72,25 @@ function divergence_free_velocity(model::FC2D{F}, ρ, ψ) where F
         w[i, J] = -(ψ(X(i+1), Z(J)) - ψ(X(i), Z(J))) / (dx * avg_Z(ρ, i, J))
     end
     return u, w
+end
+
+# Vertical momentum forcing - consvar ∂conjvar - q ∂chempot - ∂B on the face between cells a and b (b above a, at
+# inverse distance inv_d), from the densities (ρ, ρ consvar, ρ q) and (conjvar, chempot, B) of each cell: the
+# discrete forcing of `velocity_tendencies!` (BoxDynamics), written for one face; the two must agree.
+@inline function face_forcing(inv_d, ρa, ra, qa, ρb, rb, qb, conj_a, chem_a, B_a, conj_b, chem_b, B_b)
+    v = inv(ρa + ρb)
+    consvar, q = (ra + rb) * v, (qa + qb) * v
+    return - inv_d * ((conj_b - conj_a) * consvar + (chem_b - chem_a) * q + (B_b - B_a))
+end
+
+# (conjvar, chempot, B) in a cell with density ρ, conservative variable cons and composition q, as in
+# `thermodynamics!` (BoxDynamics)
+@inline function cell_thermo(fluid, ρ, cons, q)
+    p = fluid(:v, :consvar, :q).pressure(inv(ρ), cons, q)
+    conj = fluid(:p, :consvar, :q).conjugate_variable(p, cons, q)
+    chem = fluid(:p, :consvar, :q).modified_chemical_potential(p, cons, q)
+    B = fluid(:p, :consvar, :q).specific_enthalpy(p, cons, q) - conj * cons - chem * q
+    return conj, chem, B
 end
 
 # Densities ρ[j] of a column at rest in discrete balance: the vertical momentum forcing of the model vanishes on

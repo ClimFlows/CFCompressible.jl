@@ -3,7 +3,7 @@ module CFCompressible
 using CFHydrostatics: HPE
 using CFPlanets: ShallowTradPlanet, Tank2D
 import CFBoxes
-using CFBoxes: Box2D, dims, AdvectionScheme, BoxBoundaryConditions, discretize, check_tracers
+using CFBoxes: Box2D, dims, SpatialScheme, Centred2, VortexScheme, BoxBoundaryConditions, discretize, check_tracers
 using CFDiffusionSchemes: ThermoFluxScheme, ViscosityScheme
 import CFTimeSchemes
 
@@ -40,14 +40,22 @@ function FCE(model::HPE{F}, gravity::F, rhob, newton) where F
     return FCE(mgr, vcoord, planet, domain, gas, fcov, Phis, rhob, newton)
 end
 
-# fully compressible model for a 2D box geometry
-struct FC2D{F, Manager, Domain<:Box2D, Boundary<:BoxBoundaryConditions, Fluid, Advection<:AdvectionScheme, ThermoFlux<:ThermoFluxScheme{F}}
+"""
+    model = FC2D((; mgr, domain, space, fluid, vortex_scheme, thermoflux_scheme, viscosity_scheme, boundary_conditions
+                    [, spatial_scheme]))
+
+Fully compressible binary fluid in a 2D box (x, z): prognostic m = (ρ, ρ consvar, ρ q) at cell centres and the
+velocity (u, w) on faces. `spatial_scheme` (default `Centred2()`) sets the averages and differences of the C-grid,
+`vortex_scheme` the vortex force.
+"""
+struct FC2D{F, Manager, Domain<:Box2D, Boundary<:BoxBoundaryConditions, Fluid, Spatial<:SpatialScheme, Vortex<:VortexScheme, ThermoFlux<:ThermoFluxScheme{F}}
     mgr::Manager
     domain::Domain
     space::Tank2D{F}
     boundary::Boundary
     fluid::Fluid
-    advection::Advection
+    spatial_scheme::Spatial
+    vortex_scheme::Vortex
     thermoflux::ThermoFlux
     viscosity::ViscosityScheme{F}
     dx::F
@@ -55,12 +63,14 @@ struct FC2D{F, Manager, Domain<:Box2D, Boundary<:BoxBoundaryConditions, Fluid, A
     inv_dx::F
     inv_dz::F
 end
-function FC2D((; mgr, domain, space, fluid, advection_scheme, thermoflux_scheme, viscosity_scheme, boundary_conditions))
+function FC2D(params)
+    (; mgr, domain, space, fluid, vortex_scheme, thermoflux_scheme, viscosity_scheme, boundary_conditions) = params
+    spatial_scheme = get(params, :spatial_scheme, Centred2())
     Mx, Mz = CFBoxes.dims(domain)
     dx, dz = space.Lx / Mx, space.Lz / Mz
     check_tracers(boundary_conditions, 2)       # tracers (consvar, q)
     boundary = discretize(boundary_conditions, domain, (dx, dz))
-    return FC2D(mgr, domain, space, boundary, fluid, advection_scheme, thermoflux_scheme, viscosity_scheme, dx, dz, 1/dx, 1/dz)
+    return FC2D(mgr, domain, space, boundary, fluid, spatial_scheme, vortex_scheme, thermoflux_scheme, viscosity_scheme, dx, dz, 1/dx, 1/dz)
 end
 
 # implemented in Dynamics

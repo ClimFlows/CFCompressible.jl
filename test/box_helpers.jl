@@ -156,13 +156,13 @@ function test_conservation(tend!, model, state, (; mass, consvar, q); tol = 1e-1
     d = model.domain
     (ic, jc), (; dx, dz) = cells(d), model
     dstate, scratch = evaluate(tend!, model, state)
-    (; Jcons_x, Jcons_z, Jq_x, Jq_z, σ_cons) = scratch.irreversible
+    (; consflux_x, consflux_z, qflux_x, qflux_z, σ_cons) = scratch.irreversible
     inflow(Jx, Jz) = sum(Jx[first(ic), j] - Jx[last(ic)+1, j] for j in jc) / dx + sum(Jz[i, first(jc)] - Jz[i, last(jc)+1] for i in ic) / dz
     total(k) = sum(dstate.m[ic, jc, k])
     scale(k) = sum(abs, dstate.m[ic, jc, k])
     isnothing(mass) || @test abs(total(mass)) / scale(mass) < tol
-    @test abs(total(q) - inflow(Jq_x, Jq_z)) / scale(q) < tol
-    @test abs(total(consvar) - inflow(Jcons_x, Jcons_z) - sum(σ_cons[ic, jc])) / (scale(consvar) + sum(abs, σ_cons[ic, jc])) < tol
+    @test abs(total(q) - inflow(qflux_x, qflux_z)) / scale(q) < tol
+    @test abs(total(consvar) - inflow(consflux_x, consflux_z) - sum(σ_cons[ic, jc])) / (scale(consvar) + sum(abs, σ_cons[ic, jc])) < tol
 end
 
 function test_energy(tend!, cell_energies, model, state; tol = 1e-10)
@@ -241,12 +241,12 @@ function test_diagnostics((; book, internal, info), tend!, model, state, fluid_p
     # the computed diagnostics equal their direct formulas, and no recipe allocates (the book owns its outputs)
     session = open(book; state, dstate, scratch, model)
     (; ∂u_z, ∂w_x, ∂u_x, ∂w_z) = scratch.derivatives
-    (; Jcons_x, Jcons_z) = scratch.irreversible
+    (; consflux_x, consflux_z) = scratch.irreversible
     ic, jc = cells(model.domain)
     @test CookBooks.get(session, :vorticity) == ∂u_z .- ∂w_x
     @test CookBooks.get(session, :divergence) == ∂u_x .+ ∂w_z
-    @test CookBooks.get(session, :div_Jcons)[ic, jc] ≈
-          [(Jcons_x[i+1, j] - Jcons_x[i, j]) / model.dx + (Jcons_z[i, j+1] - Jcons_z[i, j]) / model.dz for i in ic, j in jc]
+    @test CookBooks.get(session, :div_consflux)[ic, jc] ≈
+          [(consflux_x[i+1, j] - consflux_x[i, j]) / model.dx + (consflux_z[i, j+1] - consflux_z[i, j]) / model.dz for i in ic, j in jc]
     for (sym, recipe) in recipes
         args = map(name -> CookBooks.get(session, name), CookBooks.fun_arg_names(recipe))
         @testset "$sym allocations" begin
@@ -257,22 +257,22 @@ function test_diagnostics((; book, internal, info), tend!, model, state, fluid_p
 end
 allocations(f::F, args::A) where {F, A} = (f(args...); @allocated f(args...))
 
-# energy input through the wall at side `s` (1 lower, 2 upper) of dimension `d`: thermal, Σ (conjvar Jcons + chempot Jq)
+# energy input through the wall at side `s` (1 lower, 2 upper) of dimension `d`: thermal, Σ (conjvar consflux + chempot qflux)
 # into the fluid, and mechanical, the work of the wall stress given by the viscous energy flux uτ on the wall faces
 function wall_input(model, scratch, d, s)
     (; domain, dx, dz) = model
     (; conjvar, chempot) = scratch.thermo
-    (; Jcons_x, Jcons_z, Jq_x, Jq_z, visc_scratch) = scratch.irreversible
+    (; consflux_x, consflux_z, qflux_x, qflux_z, uτ_x, uτ_z) = scratch.irreversible
     (ic, jc) = cells(domain)
     sign = s == 1 ? 1 : -1                                  # flux along +x/+z enters through the lower wall
     if d == 1
         I, i = s == 1 ? (first(ic), first(ic)) : (last(ic) + 1, last(ic))
-        heat = sum(conjvar[i, j] * Jcons_x[I, j] + chempot[i, j] * Jq_x[I, j] for j in jc) * dz
-        work = -sum(visc_scratch[1][I, j] for j in jc) * dz
+        heat = sum(conjvar[i, j] * consflux_x[I, j] + chempot[i, j] * qflux_x[I, j] for j in jc) * dz
+        work = -sum(uτ_x[I, j] for j in jc) * dz
     else
         J, j = s == 1 ? (first(jc), first(jc)) : (last(jc) + 1, last(jc))
-        heat = sum(conjvar[i, j] * Jcons_z[i, J] + chempot[i, j] * Jq_z[i, J] for i in ic) * dx
-        work = -sum(visc_scratch[2][i, J] for i in ic) * dx
+        heat = sum(conjvar[i, j] * consflux_z[i, J] + chempot[i, j] * qflux_z[i, J] for i in ic) * dx
+        work = -sum(uτ_z[i, J] for i in ic) * dx
     end
     return (; heat = sign * heat, work = sign * work)
 end

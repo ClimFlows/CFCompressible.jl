@@ -13,7 +13,7 @@ using SHTnsSpheres:
                     divergence!,
                     curl!
 using ManagedLoops: @with, @vec
-using CFBoxes: xrange_interior, zrange_interior, dif_x, dif_z, mirror_halo!, alloc
+using CFBoxes: xrange_interior, zrange_interior, fill_halo!, ZeroGradient, alloc, operators
 
 using ..CFCompressible.Dynamics: FCE_tendencies!
 
@@ -145,11 +145,10 @@ end
 
 # ======================= FC2D Diagnostics =======================#
 #
-# Every diagnostic is the full array, halo included, with the halo defined (copied from the bounded state and the
-# tendency scratch, or filled by the boundary conditions), so that post-processing can difference it at the boundaries.
-# Names are shared with the AN2D diagnostics (CFAnelastics); `diagnostic_info_FC2D` gives the long name, units and grid
-# location (:xz cells, :Xz u-faces, :xZ w-faces, :XZ vertices) of each. For plotting, `interior(domain, field)` strips
-# the halo on any location and `coordinates(domain, (dx, dz), location)` gives the coordinates of the points.
+# Every diagnostic is a full array with a defined halo (from the state and the tendency scratch, or a zero-gradient
+# halo), on the grid location given by `diagnostic_info_FC2D` (:xz cells, :Xz u-faces, :xZ w-faces, :XZ vertices).
+# Names are shared with AN2D. Derived fields use the operators of `model.spatial_scheme`. For plotting,
+# `interior(domain, field)` strips the halo and `coordinates(domain, (dx, dz), location)` gives the points.
 
 # CookBook of the FC2D diagnostics, opened with `open(book; state, dstate, scratch, model)`. Build the book once and
 # reuse it: it owns the output array of each computed diagnostic, allocated on its grid location on first use, which
@@ -175,25 +174,27 @@ diagnostics_FC2D(model) = let (; mgr, domain, dx) = model, info = diagnostic_inf
         temperature                      = scratch -> scratch.thermo.T,
         conjugate_variable               = scratch -> scratch.thermo.conjvar,
         modified_chemical_potential      = scratch -> scratch.thermo.chempot,
-        forcing_potential                = scratch -> scratch.momentum.B,
+        forcing_potential                = scratch -> scratch.thermo.B,
         # kinematics
         vorticity                        = scratch -> pointwise!(out(:vorticity), mgr, -, scratch.derivatives.∂u_z, scratch.derivatives.∂w_x),
         divergence                       = scratch -> pointwise!(out(:divergence), mgr, +, scratch.derivatives.∂u_x, scratch.derivatives.∂w_z),
-        mass_divergence                  = (scratch, model) -> divergence_field!(out(:mass_divergence), model, view(scratch.advection.mu, :, :, 1), view(scratch.advection.mw, :, :, 1)),
+        mass_flux_x                      = scratch -> view(scratch.advection.mu, :, :, 1),
+        mass_flux_z                      = scratch -> view(scratch.advection.mw, :, :, 1),
+        mass_divergence                  = (mass_flux_x, mass_flux_z, model) -> divergence_field!(out(:mass_divergence), model, mass_flux_x, mass_flux_z),
         kinetic_energy                   = scratch -> scratch.advection.K,
         ∂u_x                             = scratch -> scratch.derivatives.∂u_x,
         ∂w_z                             = scratch -> scratch.derivatives.∂w_z,
         ∂u_z                             = scratch -> scratch.derivatives.∂u_z,
         ∂w_x                             = scratch -> scratch.derivatives.∂w_x,
         # irreversible processes
-        Jcons_x                          = scratch -> scratch.irreversible.Jcons_x,
-        Jcons_z                          = scratch -> scratch.irreversible.Jcons_z,
-        Jq_x                             = scratch -> scratch.irreversible.Jq_x,
-        Jq_z                             = scratch -> scratch.irreversible.Jq_z,
+        consflux_x                       = scratch -> scratch.irreversible.consflux_x,
+        consflux_z                       = scratch -> scratch.irreversible.consflux_z,
+        qflux_x                          = scratch -> scratch.irreversible.qflux_x,
+        qflux_z                          = scratch -> scratch.irreversible.qflux_z,
         viscous_dissipation              = scratch -> scratch.irreversible.ρε,
         conservative_variable_production = scratch -> scratch.irreversible.σ_cons,
-        div_Jcons                        = (scratch, model) -> divergence_field!(out(:div_Jcons), model, scratch.irreversible.Jcons_x, scratch.irreversible.Jcons_z),
-        div_Jq                           = (scratch, model) -> divergence_field!(out(:div_Jq), model, scratch.irreversible.Jq_x, scratch.irreversible.Jq_z),
+        div_consflux                     = (scratch, model) -> divergence_field!(out(:div_consflux), model, scratch.irreversible.consflux_x, scratch.irreversible.consflux_z),
+        div_qflux                        = (scratch, model) -> divergence_field!(out(:div_qflux), model, scratch.irreversible.qflux_x, scratch.irreversible.qflux_z),
         # tendencies
         dρ                               = dstate -> view(dstate.m, :, :, 1),
         dρconsvar                        = dstate -> view(dstate.m, :, :, 2),
@@ -204,14 +205,12 @@ diagnostics_FC2D(model) = let (; mgr, domain, dx) = model, info = diagnostic_inf
 end
 
 # CookBook of intermediates of the FC2D tendencies, for debugging: the vorticity terms ωw, ωu of the advection, the
-# advective fluxes mu, mw (third index: ρ, ρ consvar, ρ q), and the gradients of the kinetic energy ∂K_x, ∂K_z
+# advective fluxes mu, mw (third index: ρ, ρ consvar, ρ q)
 internal_diagnostics_FC2D() = CookBook(;
     ωw   = scratch -> scratch.advection.ωw,
     ωu   = scratch -> scratch.advection.ωu,
     mu   = scratch -> scratch.advection.mu,
     mw   = scratch -> scratch.advection.mw,
-    ∂K_x = scratch -> scratch.advection.∂K_x,
-    ∂K_z = scratch -> scratch.advection.∂K_z,
 )
 
 # long name and units of each FC2D diagnostic
@@ -232,20 +231,22 @@ diagnostic_info_FC2D() = (;
     forcing_potential                = (long_name = "potential of the momentum forcing, h - conjvar consvar - chempot q", units = "J kg⁻¹",               location = :xz),
     vorticity                        = (long_name = "vorticity ∂u/∂z - ∂w/∂x",                                            units = "s⁻¹",                  location = :XZ),
     divergence                       = (long_name = "velocity divergence ∂u/∂x + ∂w/∂z",                                  units = "s⁻¹",                  location = :xz),
+    mass_flux_x                      = (long_name = "mass flux ρu along x",                                               units = "kg m⁻² s⁻¹",           location = :Xz),
+    mass_flux_z                      = (long_name = "mass flux ρw along z",                                               units = "kg m⁻² s⁻¹",           location = :xZ),
     mass_divergence                  = (long_name = "mass divergence ∇·(ρu)",                                             units = "kg m⁻³ s⁻¹",           location = :xz),
     kinetic_energy                   = (long_name = "kinetic energy per unit mass",                                       units = "J kg⁻¹",               location = :xz),
     ∂u_x                             = (long_name = "∂u/∂x",                                                              units = "s⁻¹",                  location = :xz),
     ∂w_z                             = (long_name = "∂w/∂z",                                                              units = "s⁻¹",                  location = :xz),
     ∂u_z                             = (long_name = "∂u/∂z",                                                              units = "s⁻¹",                  location = :XZ),
     ∂w_x                             = (long_name = "∂w/∂x",                                                              units = "s⁻¹",                  location = :XZ),
-    Jcons_x                          = (long_name = "diffusive flux of consvar along x",                                  units = "kg m⁻² s⁻¹ × consvar", location = :Xz),
-    Jcons_z                          = (long_name = "diffusive flux of consvar along z",                                  units = "kg m⁻² s⁻¹ × consvar", location = :xZ),
-    Jq_x                             = (long_name = "diffusive flux of composition along x",                              units = "kg m⁻² s⁻¹",           location = :Xz),
-    Jq_z                             = (long_name = "diffusive flux of composition along z",                              units = "kg m⁻² s⁻¹",           location = :xZ),
+    consflux_x                       = (long_name = "diffusive flux of consvar along x",                                  units = "kg m⁻² s⁻¹ × consvar", location = :Xz),
+    consflux_z                       = (long_name = "diffusive flux of consvar along z",                                  units = "kg m⁻² s⁻¹ × consvar", location = :xZ),
+    qflux_x                          = (long_name = "diffusive flux of composition along x",                              units = "kg m⁻² s⁻¹",           location = :Xz),
+    qflux_z                          = (long_name = "diffusive flux of composition along z",                              units = "kg m⁻² s⁻¹",           location = :xZ),
     viscous_dissipation              = (long_name = "viscous dissipation",                                                units = "W m⁻³",                location = :xz),
     conservative_variable_production = (long_name = "irreversible production of consvar",                                 units = "kg m⁻³ s⁻¹ × consvar", location = :xz),
-    div_Jcons                        = (long_name = "divergence of the diffusive flux of consvar",                        units = "kg m⁻³ s⁻¹ × consvar", location = :xz),
-    div_Jq                           = (long_name = "divergence of the diffusive flux of composition",                    units = "kg m⁻³ s⁻¹",           location = :xz),
+    div_consflux                     = (long_name = "divergence of the diffusive flux of consvar",                        units = "kg m⁻³ s⁻¹ × consvar", location = :xz),
+    div_qflux                        = (long_name = "divergence of the diffusive flux of composition",                    units = "kg m⁻³ s⁻¹",           location = :xz),
     dρ                               = (long_name = "tendency of ρ",                                                      units = "kg m⁻³ s⁻¹",           location = :xz),
     dρconsvar                        = (long_name = "tendency of ρ consvar",                                              units = "kg m⁻³ s⁻¹ × consvar", location = :xz),
     dρq                              = (long_name = "tendency of ρ q",                                                    units = "kg m⁻³ s⁻¹",           location = :xz),
@@ -271,15 +272,17 @@ function pointwise!(out, mgr, f::Fun, a, b, c) where Fun
     return out
 end
 
-# divergence of a vector (Vx, Vz) on the faces, at the cells: δ_x Vx / Δx + δ_z Vz / Δz on the interior cells; halo
-# filled by mirroring (periodic copy in periodic directions)
-function divergence_field!(div, (; mgr, domain, inv_dx, inv_dz), Vx, Vz)
+# divergence of a vector (Vx, Vz) on the faces, at the cells: δ_x Vx / Δx + δ_z Vz / Δz on the interior cells;
+# zero-gradient halo
+function divergence_field!(div, model, Vx, Vz)
+    (; mgr, domain, inv_dx, inv_dz) = model
+    (; dif_x, dif_z) = operators(model.spatial_scheme)
     @with mgr, let (irange, jrange) = (xrange_interior(domain), zrange_interior(domain))
         @vec for i in irange, j in jrange
             div[i, j] = inv_dx * dif_x(Vx, i, j) + inv_dz * dif_z(Vz, i, j)
         end
     end
-    return mirror_halo!(domain, div)
+    return fill_halo!(div, domain, ZeroGradient())
 end
 
 end # module

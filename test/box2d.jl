@@ -46,11 +46,11 @@ q_active(x, z) = q_rest(z) + 0.001 * cos(2π * x / Lx + 0.5) * cos(π * z / Lz)
 ##### FC2D configuration and states
 #####
 
-function fc_model(; Mx = 32, Mz = 16, mgr = mgr, advection_scheme = AdvEnergyCons(), thermoflux_scheme = thermoflux,
+function fc_model(; Mx = 32, Mz = 16, mgr = mgr, vortex_scheme = VortexEnergyCons(), thermoflux_scheme = thermoflux,
                    boundary = (Periodic, Bounded), walls = (; bottom = closed_wall(), top = closed_wall()))
     domain = test_box(Mx, Mz; boundary)
     boundary_conditions = BoxBoundaryConditions(domain; walls...)
-    return FC2D((; mgr, domain, space, fluid, advection_scheme, thermoflux_scheme,
+    return FC2D((; mgr, domain, space, fluid, vortex_scheme, thermoflux_scheme,
         viscosity_scheme = ViscosityScheme(dyn_visc = 1e-3, bulk_visc = 1e-3), boundary_conditions))
 end
 
@@ -160,9 +160,9 @@ end
 
     @testset "schemes" begin
         # the other advection and heat flux schemes, together (independent code paths): same properties, except
-        # energy conservation, which they don't have by design (AdvEnstrophyCons conserves enstrophy; ThermoFluxDowngradient
+        # energy conservation, which they don't have by design (VortexEnstrophyCons conserves enstrophy; ThermoFluxDowngradient
         # has no heating, σ = 0)
-        variant = fc_model(mgr = VectorizedCPU(), advection_scheme = AdvEnstrophyCons(), thermoflux_scheme = ThermoFluxDowngradient(k_T = 1e-4, k_q = 1e-5))
+        variant = fc_model(mgr = VectorizedCPU(), vortex_scheme = VortexEnstrophyCons(), thermoflux_scheme = ThermoFluxDowngradient(k_T = 1e-4, k_q = 1e-5))
         test_memory_safety(fc_tend!, variant, active; reuse = false)
         test_symmetries(fc_tend!, variant, active)
         test_walls(fc_tend!, variant, active)

@@ -204,13 +204,13 @@ diagnostics_FC2D(model) = let (; mgr, domain, dx) = model, info = diagnostic_inf
     )
 end
 
-# CookBook of intermediates of the FC2D tendencies, for debugging: the vorticity terms ωw, ωu of the advection, the
-# advective fluxes mu, mw (third index: ρ, ρ consvar, ρ q)
+# CookBook of intermediates of the FC2D tendencies, for debugging: the vortex force ω×u = (vortex_x, vortex_z) of the
+# advection, the advective fluxes mu, mw (third index: ρ, ρ consvar, ρ q)
 internal_diagnostics_FC2D() = CookBook(;
-    ωw   = scratch -> scratch.advection.ωw,
-    ωu   = scratch -> scratch.advection.ωu,
-    mu   = scratch -> scratch.advection.mu,
-    mw   = scratch -> scratch.advection.mw,
+    vortex_x = scratch -> scratch.advection.vortex_x,
+    vortex_z = scratch -> scratch.advection.vortex_z,
+    mu       = scratch -> scratch.advection.mu,
+    mw       = scratch -> scratch.advection.mw,
 )
 
 # long name and units of each FC2D diagnostic

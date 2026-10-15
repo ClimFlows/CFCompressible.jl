@@ -80,7 +80,8 @@ end
 Return an upper bound `ω` [s⁻¹] on the fastest discrete frequency of the state over the interior, the sum of:
 - advection, centred on the C-grid: max|u|/dx + max|w|/dz;
 - sound, on the C-grid (ω² = c² (4/dx² sin²(k dx/2) + 4/dz² sin²(m dz/2))): 2 max(c) √(1/dx² + 1/dz²);
-- diffusion: 4 max(ν, k_T, k_q) (1/dx² + 1/dz²), with ν = (μ + μ_b) / min(ρ);
+- diffusion: 4 max(ν, k_T, k_q) (1/dx² + 1/dz²), with ν = (4μ/3) / min(ρ), the compressive modes being damped
+  by (4μ/3) ∇(∇·u);
 - internal gravity waves (ω = N |kₓ|/|k| ≤ N): max(N), see `max_buoyancy_frequency`.
 """
 function max_frequency(model::FC2D{F}, state) where {F}
@@ -90,7 +91,7 @@ function max_frequency(model::FC2D{F}, state) where {F}
     inv_d2         = inv(dx^2) + inv(dz^2)
     advection      = maximum(abs, view(u, irange, jrange)) / dx + maximum(abs, view(w, irange, jrange)) / dz
     sound          = 2 * max_sound_speed(state, model) * sqrt(inv_d2)
-    ν              = (viscosity.dyn_visc + viscosity.bulk_visc) / minimum(view(m, irange, jrange, 1))
+    ν              = (4 / 3) * viscosity.dyn_visc / minimum(view(m, irange, jrange, 1))
     diffusion      = 4 * max(ν, thermoflux.k_T, thermoflux.k_q) * inv_d2
     return advection + sound + diffusion + max_buoyancy_frequency(model, m) + floatmin(F)
 end

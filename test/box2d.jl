@@ -51,7 +51,7 @@ function fc_model(; Mx = 32, Mz = 16, mgr = mgr, vortex_scheme = VortexEnergyCon
     domain = test_box(Mx, Mz; boundary)
     boundary_conditions = BoxBoundaryConditions(domain; walls...)
     return FC2D((; mgr, domain, space, fluid, spatial_scheme = Centred2(), vortex_scheme, thermoflux_scheme,
-        viscosity_scheme = ViscosityScheme(dyn_visc = 1e-3, bulk_visc = 1e-3), boundary_conditions))
+        viscosity_scheme = ViscosityScheme(dyn_visc = 1e-3), boundary_conditions))
 end
 
 fc_tend!(model, dstate, scratch, state) = CFCompressible.tendencies!(dstate, scratch, model, state, 0.0)

@@ -10,7 +10,7 @@ using ManagedLoops: @vec, @with
 
 ## TENDENCIES
 #
-# ∂ₜm = -∇·(m u) - ∇·J + σ ẑ_consvar,   ∂ₜu = -consvar ∇conjvar - q ∇chempot - ∇B - g ẑ - ∇K + ω×u + F/ρ,
+# ∂ₜm = -∇·(m u) - ∇·J + σ ẑ_consvar,   ∂ₜu = -consvar ∇conjvar - q ∇chempot - ∇B - g ẑ - ∇K - ω×u + F/ρ,
 # with m = (ρ, ρ consvar, ρ q) at cell centres and (u, w) on faces. Averages and differences come from
 # `operators(model.spatial_scheme)`.
 
@@ -32,16 +32,17 @@ function FC2D_tendencies!(dstate, scratch, model::FC2D, state, t)
 
     ∂u_x, ∂w_z, ∂u_z, ∂w_x, K = kinematics!((∂u_x, ∂w_z, ∂u_z, ∂w_x, K), model, state)
 
-    ## ADVECTION; fluxes m u of the densities, vortex force ω×u = (ωw, -ωu)
-    (; mu, mw, ωw, ωu, vortex_scratch) = scratch.advection
+    ## ADVECTION; fluxes m u of the densities, vortex force ω×u = (vortex_x, vortex_z)
+    (; mu, mw, vortex_x, vortex_z, vortex_scratch) = scratch.advection
 
     mu, mw                 = advective_flux!((mu, mw), model, state)
-    ωw, ωu, vortex_scratch = vortex_force!((ωw, ωu, vortex_scratch), model, vortex_scheme, (state.u, state.w), view(state.m, :, :, 1))
+    vortex_x, vortex_z, vortex_scratch = vortex_force!((vortex_x, vortex_z, vortex_scratch), model, vortex_scheme, (state.u, state.w), view(state.m, :, :, 1))
 
     ## VISCOUS STRESS; u·τ and F = ∇·τ on faces
-    (; uτ_x, uτ_z, F_x, F_z) = scratch.irreversible
+    (; uτ_x, uτ_z, F_x, F_z, wτ_xz, uτ_xz) = scratch.irreversible
 
-    uτ_x, uτ_z, F_x, F_z = viscous_stress!((uτ_x, uτ_z, F_x, F_z), model, state, (∂u_x, ∂w_z, ∂u_z, ∂w_x))
+    uτ_x, uτ_z, F_x, F_z, wτ_xz, uτ_xz = viscous_stress!((uτ_x, uτ_z, F_x, F_z, wτ_xz, uτ_xz), model, state,
+                                                          (∂u_x, ∂w_z, ∂u_z, ∂w_x))
 
     ## IRREVERSIBLE FLUXES of consvar and q, with the wall conditions, and the diffusive heating on faces
     (; consflux_x, consflux_z, qflux_x, qflux_z, diffusive_heating_x, diffusive_heating_z) = scratch.irreversible
@@ -56,7 +57,7 @@ function FC2D_tendencies!(dstate, scratch, model::FC2D, state, t)
                                       (diffusive_heating_x, diffusive_heating_z))
 
     ## MOMENTUM
-    du, dw = velocity_tendencies!((dstate.u, dstate.w), model, state, thermo, (K, ωw, ωu, F_x, F_z))
+    du, dw = velocity_tendencies!((dstate.u, dstate.w), model, state, thermo, (K, vortex_x, vortex_z, F_x, F_z))
 
     ## DENSITIES
     dm = dm!(dstate.m, model, state, (mu, mw, consflux_x, consflux_z, qflux_x, qflux_z, σ_cons))
@@ -66,8 +67,8 @@ function FC2D_tendencies!(dstate, scratch, model::FC2D, state, t)
     scratch = (
         thermo          = thermo,
         derivatives     = (; ∂u_x, ∂w_z, ∂u_z, ∂w_x),
-        advection       = (; K, mu, mw, ωw, ωu, vortex_scratch),
-        irreversible    = (; uτ_x, uτ_z, F_x, F_z, ρε, consflux_x, consflux_z, qflux_x, qflux_z,
+        advection       = (; K, mu, mw, vortex_x, vortex_z, vortex_scratch),
+        irreversible    = (; uτ_x, uτ_z, F_x, F_z, wτ_xz, uτ_xz, ρε, consflux_x, consflux_z, qflux_x, qflux_z,
                              diffusive_heating_x, diffusive_heating_z, σ_cons),
     )
     return dstate, scratch
@@ -186,28 +187,47 @@ end
 
 ## VISCOUS STRESS
 
-# On faces: the viscous force F = ∇·τ (per unit volume) and the energy flux u·τ; ρε = ∇·(u·τ) - u·F is formed in
-# `dissipative_heating!`
-function viscous_stress!((uτ_x_, uτ_z_, F_x_, F_z_), model::FC2D{F}, (; u, w), (∂u_x, ∂w_z, ∂u_z, ∂w_x)) where {F}
+# Constant dynamic viscosity μ and the Stokes hypothesis: τ = 2μ (S - (∇·u) I / 3). On faces: the viscous force F = ∇·τ
+# (per unit volume) and the energy flux u·τ; ρε = ∇·(u·τ) - u·F is formed in `dissipative_heating!`.
+# The normal stresses τ_xx, τ_zz live at the cells and the shear stress τ_xz = μ (∂u/∂z + ∂w/∂x) at the vertices. The
+# energy flux pairs each stress with the velocity it multiplies before interpolating,
+#   (u·τ)_x = u ℑX(τ_xx) + ℑz(ℑX(w) τ_xz),   (u·τ)_z = w ℑZ(τ_zz) + ℑx(ℑZ(u) τ_xz),
+# so that, summing by parts, ρε is in each cell the discrete dissipation τ:∇u, a sum of squares (≥ 0):
+#   ρε = (2μ/3) (∂u_x² + ∂w_z² + (∂u_x - ∂w_z)²) + μ ℑxz((∂u_z + ∂w_x)²),
+# the first term being 2μ times the squared deviatoric normal strains ∂u_x - D/3, ∂w_z - D/3 and -D/3 (∂v/∂y = 0),
+# with D = ∇·u.
+# F is written in the rotational form F = -μ ∇×ω + (4μ/3) ∇(∇·u), identical to ∇·τ on the C-grid.
+function viscous_stress!((uτ_x_, uτ_z_, F_x_, F_z_, wτ_xz_, uτ_xz_), model::FC2D{F}, (; u, w), (∂u_x, ∂w_z, ∂u_z, ∂w_x)) where {F}
     (; mgr, domain, inv_dx, inv_dz, viscosity, spatial_scheme) = model
-    (; dyn_visc, bulk_visc) = viscosity
+    (; dyn_visc) = viscosity
     (; ℑ, δ) = operators(spatial_scheme)
 
     uτ_x    = alloc!(uτ_x_, F, domain, (Face(), Cell()))
     uτ_z    = alloc!(uτ_z_, F, domain, (Cell(), Face()))
     F_x     = alloc!(F_x_, F, domain, (Face(), Cell()))
     F_z     = alloc!(F_z_, F, domain, (Cell(), Face()))
+    wτ_xz   = alloc!(wτ_xz_, F, domain, (Face(), Face()))
+    uτ_xz   = alloc!(uτ_xz_, F, domain, (Face(), Face()))
+
+    # vertices: the work of the shear stress, ℑX(w) τ_xz and ℑZ(u) τ_xz
+    @with mgr, let (irange, jrange) = (faces(domain, 1), faces(domain, 2))
+        @inbounds @vec for I in irange, J in jrange
+            τ_xz        = dyn_visc * ( ∂u_z[I, J] + ∂w_x[I, J] )
+            wτ_xz[I, J] = ℑ(w, (1,), (Face(),), I, J) * τ_xz
+            uτ_xz[I, J] = ℑ(u, (2,), (Face(),), I, J) * τ_xz
+        end
+    end
+    periodize!(model, (wτ_xz, uτ_xz))
 
     @with mgr, let (irange, jrange) = (faces(domain, 1), cells(domain, 2))
         @inbounds @vec for I in irange, j in jrange
             divu_x  = ℑ(∂u_x, (1,), (Face(),), I, j) + ℑ(∂w_z, (1,), (Face(),), I, j)                   # ∇·u
             ∂divu_x = inv_dx * (δ(∂u_x, (1,), (Face(),), I, j) + δ(∂w_z, (1,), (Face(),), I, j))        # ∂ₓ(∇·u)
             ∂ω_z    = inv_dz * (δ(∂u_z, (2,), (Cell(),), I, j) - δ(∂w_x, (2,), (Cell(),), I, j))        # ∂_z ω
-            # u·τ along x
-            uτ_x[I, j] = ( u[I, j] * ( 2 * dyn_visc * ℑ(∂u_x, (1,), (Face(),), I, j) + ( bulk_visc - (2 / 3) * dyn_visc ) * divu_x )
-                    + dyn_visc * ℑ(w, (1, 2), (Face(), Cell()), I, j) * ( ℑ(∂u_z, (2,), (Cell(),), I, j) + ℑ(∂w_x, (2,), (Cell(),), I, j) ) )
-            # Fₓ = μ ∂_z ω + (μ_b + 4μ/3) ∂ₓ(∇·u)
-            F_x[I, j] = dyn_visc * ∂ω_z + ( bulk_visc + ( 4 / 3) * dyn_visc ) * ∂divu_x
+            # u·τ along x: u ℑX(τ_xx) + ℑz(ℑX(w) τ_xz), with τ_xx = 2μ (∂u/∂x - ∇·u / 3)
+            uτ_x[I, j] = 2 * dyn_visc * u[I, j] * ( ℑ(∂u_x, (1,), (Face(),), I, j) - divu_x / 3 ) + ℑ(wτ_xz, (2,), (Cell(),), I, j)
+            # Fₓ = μ (∂_z ω + (4/3) ∂ₓ(∇·u))
+            F_x[I, j] = dyn_visc * ( ∂ω_z + (4 / 3) * ∂divu_x )
         end
     end
     @with mgr, let (irange, jrange) = (cells(domain, 1), faces(domain, 2))
@@ -215,17 +235,16 @@ function viscous_stress!((uτ_x_, uτ_z_, F_x_, F_z_), model::FC2D{F}, (; u, w),
             divu_z  = ℑ(∂u_x, (2,), (Face(),), i, J) + ℑ(∂w_z, (2,), (Face(),), i, J)                   # ∇·u
             ∂divu_z = inv_dz * (δ(∂u_x, (2,), (Face(),), i, J) + δ(∂w_z, (2,), (Face(),), i, J))        # ∂_z(∇·u)
             ∂ω_x    = inv_dx * (δ(∂u_z, (1,), (Cell(),), i, J) - δ(∂w_x, (1,), (Cell(),), i, J))        # ∂ₓ ω
-            # u·τ along z
-            uτ_z[i, J] = ( w[i, J] * ( 2 * dyn_visc * ℑ(∂w_z, (2,), (Face(),), i, J) + ( bulk_visc - (2 / 3) * dyn_visc ) * divu_z )
-                    + dyn_visc * ℑ(u, (1, 2), (Cell(), Face()), i, J) * ( ℑ(∂u_z, (1,), (Cell(),), i, J) + ℑ(∂w_x, (1,), (Cell(),), i, J) ) )
-            # F_z = -μ ∂ₓ ω + (μ_b + 4μ/3) ∂_z(∇·u)
-            F_z[i, J] = - dyn_visc * ∂ω_x + ( bulk_visc + ( 4 / 3) * dyn_visc ) * ∂divu_z
+            # u·τ along z: w ℑZ(τ_zz) + ℑx(ℑZ(u) τ_xz), with τ_zz = 2μ (∂w/∂z - ∇·u / 3)
+            uτ_z[i, J] = 2 * dyn_visc * w[i, J] * ( ℑ(∂w_z, (2,), (Face(),), i, J) - divu_z / 3 ) + ℑ(uτ_xz, (1,), (Cell(),), i, J)
+            # F_z = μ (-∂ₓ ω + (4/3) ∂_z(∇·u))
+            F_z[i, J] = dyn_visc * ( -∂ω_x + (4 / 3) * ∂divu_z )
         end
     end
 
     periodize!(model, (uτ_x, uτ_z, F_x, F_z))
 
-    return uτ_x, uτ_z, F_x, F_z
+    return uτ_x, uτ_z, F_x, F_z, wτ_xz, uτ_xz
 end
 
 ## IRREVERSIBLE FLUXES
@@ -389,9 +408,9 @@ end
 
 ## MOMENTUM
 
-# Velocity tendencies on faces: -consvar ∇conjvar - q ∇chempot - ∇B - g ẑ - ∇K + ω×u + F/ρ, with face values
+# Velocity tendencies on faces: -consvar ∇conjvar - q ∇chempot - ∇B - g ẑ - ∇K - ω×u + F/ρ, with face values
 # ρ = avg(m₁) and consvar, q = avg(m₂), avg(m₃) / ρ
-function velocity_tendencies!((du_, dw_), model::FC2D{F}, (; m), (; conjvar, chempot, B), (K, ωw, ωu, F_x, F_z)) where {F}
+function velocity_tendencies!((du_, dw_), model::FC2D{F}, (; m), (; conjvar, chempot, B), (K, vortex_x, vortex_z, F_x, F_z)) where {F}
     (; mgr, domain, space, inv_dx, inv_dz, spatial_scheme) = model
     (; g) = space
     (; ℑ, δ) = operators(spatial_scheme)
@@ -405,14 +424,14 @@ function velocity_tendencies!((du_, dw_), model::FC2D{F}, (; m), (; conjvar, che
         @inbounds @vec for I in irange, j in jrange
             v_x      = inv(ℑ(m1, (1,), (Face(),), I, j))
             du[I, j] = - inv_dx * ( v_x * ( ℑ(m2, (1,), (Face(),), I, j) * δ(conjvar, (1,), (Face(),), I, j) + ℑ(m3, (1,), (Face(),), I, j) * δ(chempot, (1,), (Face(),), I, j) )
-                                   + δ(B, (1,), (Face(),), I, j) + δ(K, (1,), (Face(),), I, j) ) - ωw[I, j] + v_x * F_x[I, j]
+                                   + δ(B, (1,), (Face(),), I, j) + δ(K, (1,), (Face(),), I, j) ) - vortex_x[I, j] + v_x * F_x[I, j]
         end
     end
     @with mgr, let (irange, jrange) = (cells(domain, 1), faces(domain, 2))
         @inbounds @vec for i in irange, J in jrange
             v_z      = inv(ℑ(m1, (2,), (Face(),), i, J))
             dw[i, J] = - inv_dz * ( v_z * ( ℑ(m2, (2,), (Face(),), i, J) * δ(conjvar, (2,), (Face(),), i, J) + ℑ(m3, (2,), (Face(),), i, J) * δ(chempot, (2,), (Face(),), i, J) )
-                                   + δ(B, (2,), (Face(),), i, J) + δ(K, (2,), (Face(),), i, J) ) - g + ωu[i, J] + v_z * F_z[i, J]
+                                   + δ(B, (2,), (Face(),), i, J) + δ(K, (2,), (Face(),), i, J) ) - g - vortex_z[i, J] + v_z * F_z[i, J]
         end
     end
     return du, dw

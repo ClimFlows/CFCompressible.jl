@@ -15,7 +15,7 @@ Their sum over the interior, times Δx Δz, is the energy conserved by the energ
 function energies!((ke_, pe_, te_), state, model::FC2D{F}) where {F}
     ke = kinetic_energy!(ke_, state, model)
     pe = potential_energy!(pe_, state, model)
-    te = alloc!(te_, F, model.domain, (Cell(), Cell()))
+    te = alloc!(te_, F, model.mgr, model.domain, (Cell(), Cell()))
     @. te = ke + pe
     return ke, pe, te
 end
@@ -23,9 +23,9 @@ end
 # KE = ρ (⟨u²⟩ₓ + ⟨w²⟩_z) / 2
 function kinetic_energy!(ke_, (; m, u, w), model::FC2D{F}) where {F}
     (; mgr, domain) = model
-    ke = alloc!(ke_, F, domain, (Cell(), Cell()))
+    ke = alloc!(ke_, F, mgr, domain, (Cell(), Cell()))
     @with mgr, let (irange, jrange) = (cells(domain, 1), cells(domain, 2))
-        @vec for i in irange, j in jrange
+        @inbounds @vec for i in irange, j in jrange
             ke[i, j] = 0.5 * m[i, j, 1] * (ℑ((u, u), (1,), (Cell(),), i, j) + ℑ((w, w), (2,), (Cell(),), i, j))
         end
     end
@@ -37,9 +37,9 @@ end
 function potential_energy!(pe_, (; m), model::FC2D{F}) where {F}
     (; mgr, domain, fluid, space, dz) = model
     (; g, Lz) = space
-    pe = alloc!(pe_, F, domain, (Cell(), Cell()))
+    pe = alloc!(pe_, F, mgr, domain, (Cell(), Cell()))
     @with mgr, let (irange, jrange) = (axes(pe, 1), axes(pe, 2))
-        @vec for i in irange, j in jrange
+        @inbounds @vec for i in irange, j in jrange
             v = inv(m[i, j, 1])
             consvar, q = m[i, j, 2] * v, m[i, j, 3] * v
             p = fluid(:v, :consvar, :q).pressure(v, consvar, q)

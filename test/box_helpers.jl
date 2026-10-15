@@ -6,8 +6,8 @@
 # are filled with `ALLOC_FILL[]`, so that we can check that results never depend on the contents of new allocations.
 const ALLOC_FILL = Ref(0.0)
 MutatingOrNot.similar!(::MutatingOrNot.Void, y...) = fill!(similar(y...), ALLOC_FILL[])
-CFBoxes.alloc!(::MutatingOrNot.Void, F::Type, box::CFBoxes.AbstractBox, location::Symbol, dims...) =
-    fill!(CFBoxes.alloc(F, box, location, dims...), ALLOC_FILL[])
+CFBoxes.alloc!(::MutatingOrNot.Void, F::Type, mgr, box::CFBoxes.AbstractBox, location::Tuple, dims...) =
+    fill!(CFBoxes.alloc(F, mgr, box, location, dims...), ALLOC_FILL[])
 
 function with_fill(f, value)
     old = ALLOC_FILL[]
@@ -223,7 +223,7 @@ function test_diagnostics((; book, internal, info), tend!, model, state, fluid_p
     # every diagnostic lies on its declared grid location
     session = open(book; state = copy_state(state), dstate, scratch, model)
     for sym in keys(getfield(book, :recipes))
-        @test size(CookBooks.get(session, sym)) == size(alloc(Float64, model.domain, info[sym].location))
+        @test size(CookBooks.get(session, sym)) == size(alloc(Float64, nothing, model.domain, info[sym].location))
     end
     close(session)
     # consvar = θ for the test fluid; for a fluid with consvar = s, the same recipes give s = consvar and the same θ

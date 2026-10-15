@@ -15,21 +15,22 @@ velocity `velocity = (u, w)`, face arrays shaped like u and w (e.g. from `diverg
 flow); `nothing` is the fluid at rest. The halo is set by the boundary conditions.
 """
 function initialize(model::FC2D{F}; density, consvar, q, velocity = nothing) where F
-    (; domain, dx, dz) = model
+    (; mgr, domain, dx, dz) = model
     x(i) = cellpoint(domain, dx, 1, i); z(j) = cellpoint(domain, dz, 2, j)
-    m = alloc(F, domain, (Cell(), Cell()), 3)
+    m = alloc(F, mgr, domain, (Cell(), Cell()), 3)
     for i in axes(m, 1), j in interior_cells(domain, 2)
         ρ = density[i, j]
         m[i, j, 1], m[i, j, 2], m[i, j, 3] = ρ, ρ * consvar(x(i), z(j)), ρ * q(x(i), z(j))
     end
     fill_halo!(m, domain, ZeroGradient())
-    u, w = initial_velocity(velocity, F, domain)
+    u, w = initial_velocity(velocity, F, mgr, domain)
     return state_bc!(model, (; m, u, w))
 end
 
-# initial velocity: a copy of the given face arrays, or zero (at rest)
-initial_velocity((u, w)::Tuple, F, domain) = (copy(u), copy(w))
-initial_velocity(::Nothing, F, domain) = (alloc(F, domain, (Face(), Cell())), alloc(F, domain, (Cell(), Face())))
+# initial velocity: a copy of the given face arrays, or zero (at rest), in arrays placed by the manager (see `alloc`)
+initial_velocity((u, w)::Tuple, F, mgr, domain) =
+    (copyto!(alloc(F, mgr, domain, (Face(), Cell())), u), copyto!(alloc(F, mgr, domain, (Cell(), Face())), w))
+initial_velocity(::Nothing, F, mgr, domain) = (alloc(F, mgr, domain, (Face(), Cell())), alloc(F, mgr, domain, (Cell(), Face())))
 
 """
     ρ = balanced_density(model::FC2D; consvar, q, ptop)
@@ -39,10 +40,10 @@ in discrete hydrostatic balance (the model's vertical momentum forcing vanishes 
 pressure `ptop` [Pa] in the top cell.
 """
 function balanced_density(model::FC2D{F}; consvar, q, ptop) where F
-    (; domain, dx, dz) = model
+    (; mgr, domain, dx, dz) = model
     x(i) = cellpoint(domain, dx, 1, i); z(j) = cellpoint(domain, dz, 2, j)
     jc = interior_cells(domain, 2)
-    ρ = alloc(F, domain, (Cell(), Cell()))
+    ρ = alloc(F, mgr, domain, (Cell(), Cell()))
     cons_column, q_column = zeros(F, ncells(domain, 2)), zeros(F, ncells(domain, 2))
     for i in axes(ρ, 1)
         for j in jc
@@ -62,9 +63,9 @@ from `balanced_density`), from a mass streamfunction ψ(X, Z) [kg m⁻¹ s⁻¹]
 wall vanishes where ψ is constant along it. Faces without two neighbouring cells (halo edges) are zero.
 """
 function divergence_free_velocity(model::FC2D{F}, ρ, ψ) where F
-    (; domain, dx, dz) = model
+    (; mgr, domain, dx, dz) = model
     X(I) = facepoint(domain, dx, 1, I); Z(J) = facepoint(domain, dz, 2, J)
-    u, w = alloc(F, domain, (Face(), Cell())), alloc(F, domain, (Cell(), Face()))
+    u, w = alloc(F, mgr, domain, (Face(), Cell())), alloc(F, mgr, domain, (Cell(), Face()))
     for I in 2:size(ρ, 1), j in axes(u, 2)
         u[I, j] = (ψ(X(I), Z(j+1)) - ψ(X(I), Z(j))) / (dz * ℑ(ρ, (1,), (Face(),), I, j))
     end

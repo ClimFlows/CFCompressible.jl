@@ -157,7 +157,7 @@ end
 diagnostics_FC2D(model) = let (; mgr, domain, dx) = model, info = diagnostic_info_FC2D(), cache = Dict{Symbol, Any}()
     # output array of the computed diagnostic `name`, on its grid location (see `diagnostic_info_FC2D`), allocated on
     # first use
-    out(name) = get!(() -> alloc(typeof(dx), domain, info[name].location), cache, name)::Matrix{typeof(dx)}
+    out(name) = get!(() -> alloc(typeof(dx), mgr, domain, info[name].location), cache, name)::Matrix{typeof(dx)}
     CookBook(;
         # state
         conservative_variable            = scratch -> scratch.thermo.consvar,
@@ -257,7 +257,7 @@ diagnostic_info_FC2D() = (;
 # out = f(a, b[, c]) pointwise on arrays of the same grid, halo included
 function pointwise!(out, mgr, f::Fun, a, b) where Fun
     @with mgr, let (irange, jrange) = (axes(out, 1), axes(out, 2))
-        @vec for i in irange, j in jrange
+        @inbounds @vec for i in irange, j in jrange
             out[i, j] = f(a[i, j], b[i, j])
         end
     end
@@ -265,7 +265,7 @@ function pointwise!(out, mgr, f::Fun, a, b) where Fun
 end
 function pointwise!(out, mgr, f::Fun, a, b, c) where Fun
     @with mgr, let (irange, jrange) = (axes(out, 1), axes(out, 2))
-        @vec for i in irange, j in jrange
+        @inbounds @vec for i in irange, j in jrange
             out[i, j] = f(a[i, j], b[i, j], c[i, j])
         end
     end
@@ -278,7 +278,7 @@ function divergence_field!(div, model, Vx, Vz)
     (; mgr, domain, inv_dx, inv_dz) = model
     (; δ) = operators(model.spatial_scheme)
     @with mgr, let (irange, jrange) = (interior_cells(domain, 1), interior_cells(domain, 2))
-        @vec for i in irange, j in jrange
+        @inbounds @vec for i in irange, j in jrange
             div[i, j] = inv_dx * δ(Vx, (1,), (Cell(),), i, j) + inv_dz * δ(Vz, (2,), (Cell(),), i, j)
         end
     end

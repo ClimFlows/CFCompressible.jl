@@ -120,10 +120,10 @@ divergence_free_velocity(model::FC2D, ρ, ψ) = BoxInitialize.divergence_free_ve
 
 # specify main time integration loop
 """
-    state = loop(model::FC2D, state0, time_scheme, params; outputs = nothing)
-Main time integration loop for the FC2D model; returns the final state.
+    state = loop(model::FC2D, state, time_scheme, params; outputs = nothing)
+Main time integration loop for the FC2D model; advances `state` in place and returns it.
 - `model`: FC2D model instance
-- `state0`: initial state (see `initialize`)
+- `state`: initial state (see `initialize`), overwritten by the final state; copy it first to keep it
 - `time_scheme`: time integration scheme
 - `params`: (; Nslice, slice_size, dt_max, cfl): `Nslice` time slices of `slice_size` [s], each split into equal
   steps of at most `dt_max` [s] and `cfl` (≤ 1 for stability) times the stability limit of `time_scheme`, see
@@ -132,7 +132,7 @@ Main time integration loop for the FC2D model; returns the final state.
   time slice, with the diagnostics `book` and the time `t` [s] (e.g. to record diagnostics), then closed with
   `close(outputs)` when the run ends, even on error; `nothing` records nothing
 """
-loop(model::FC2D, state0, time_scheme, params; kwargs...) = Loops.loop(model, state0, time_scheme, params; kwargs...)
+loop(model::FC2D, state, time_scheme, params; kwargs...) = Loops.loop(model, state, time_scheme, params; kwargs...)
 
 # pointwise energies of FC2D
 """

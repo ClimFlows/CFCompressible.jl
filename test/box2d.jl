@@ -68,9 +68,9 @@ function fc_state(model; active = true)
     x(i) = cellpoint(domain, dx, 1, i); z(j) = cellpoint(domain, dz, 2, j)
     X(I) = facepoint(domain, dx, 1, I); Z(J) = facepoint(domain, dz, 2, J)
 
-    m = alloc(Float64, domain, (Cell(), Cell()), 3)
-    u = alloc(Float64, domain, (Face(), Cell()))
-    w = alloc(Float64, domain, (Cell(), Face()))
+    m = alloc(Float64, nothing, domain, (Cell(), Cell()), 3)
+    u = alloc(Float64, nothing, domain, (Face(), Cell()))
+    w = alloc(Float64, nothing, domain, (Cell(), Face()))
     for i in axes(m, 1), j in axes(m, 2)
         r = ρ(x(i), z(j))
         m[i, j, 1] = r
@@ -205,6 +205,6 @@ end
 
     @testset "driver loop" begin
         params = (; Nslice = 2, slice_size = 1e-3, dt_max = 2e-4, cfl = 0.5)
-        @test all_finite(CFCompressible.loop(model, active, CFTimeSchemes.RungeKutta4(model), params))
+        @test all_finite(CFCompressible.loop(model, copy_state(active), CFTimeSchemes.RungeKutta4(model), params))
     end
 end

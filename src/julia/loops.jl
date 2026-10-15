@@ -2,7 +2,7 @@ module Loops
 
 import CFTimeSchemes: CFTimeSchemes, IVPSolver, advance!, scratch_space, max_time_step
 using ..CFCompressible: FC2D, tendencies!, diagnostics
-using CFBoxes: xrange_interior, zrange_interior
+using CFBoxes: interior_cells
 using MutatingOrNot: void
 
 export loop
@@ -86,7 +86,7 @@ Return an upper bound `ω` [s⁻¹] on the fastest discrete frequency of the sta
 function max_frequency(model::FC2D{F}, state) where {F}
     (; m, u, w) = state
     (; domain, dx, dz, viscosity, thermoflux) = model
-    irange, jrange = xrange_interior(domain), zrange_interior(domain)
+    irange, jrange = interior_cells(domain, 1), interior_cells(domain, 2)
     inv_d2         = inv(dx^2) + inv(dz^2)
     advection      = maximum(abs, view(u, irange, jrange)) / dx + maximum(abs, view(w, irange, jrange)) / dz
     sound          = 2 * max_sound_speed(state, model) * sqrt(inv_d2)
@@ -100,7 +100,7 @@ end
 # N² < 0 (static instability) does not oscillate and gives 0
 function max_buoyancy_frequency((; fluid, domain, space, dz)::FC2D{F}, m) where {F}
     pressure, volume_functions = fluid(:v, :consvar, :q).pressure, fluid(:p, :consvar, :q).volume_functions
-    irange, jrange = xrange_interior(domain), zrange_interior(domain)
+    irange, jrange = interior_cells(domain, 1), interior_cells(domain, 2)
     N2max = zero(F)
     for J in first(jrange)+1:last(jrange), i in irange
         v_1, v_2       = inv(m[i, J-1, 1]), inv(m[i, J, 1])
@@ -116,8 +116,8 @@ end
 # maximum sound speed over the interior
 function max_sound_speed((; m), (; fluid, domain)::FC2D)
     c2 = fluid(:v, :consvar, :q).sound_speed2
-    c2max = maximum(xrange_interior(domain)) do i
-        maximum(zrange_interior(domain)) do j
+    c2max = maximum(interior_cells(domain, 1)) do i
+        maximum(interior_cells(domain, 2)) do j
             v = inv(m[i, j, 1])
             c2(v, m[i, j, 2] * v, m[i, j, 3] * v)
         end

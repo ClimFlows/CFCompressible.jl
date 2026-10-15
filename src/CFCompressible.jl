@@ -3,7 +3,7 @@ module CFCompressible
 using CFHydrostatics: HPE
 using CFPlanets: ShallowTradPlanet, Tank2D
 import CFBoxes
-using CFBoxes: Box2D, dims, SpatialScheme, Centred2, VortexScheme, BoxBoundaryConditions, discretize, check_tracers
+using CFBoxes: Box2D, dims, SpatialScheme, check_halo, VortexScheme, BoxBoundaryConditions, discretize, check_tracers
 using CFDiffusionSchemes: ThermoFluxScheme, ViscosityScheme
 import CFTimeSchemes
 
@@ -41,11 +41,11 @@ function FCE(model::HPE{F}, gravity::F, rhob, newton) where F
 end
 
 """
-    model = FC2D((; mgr, domain, space, fluid, vortex_scheme, thermoflux_scheme, viscosity_scheme, boundary_conditions
-                    [, spatial_scheme]))
+    model = FC2D((; mgr, domain, space, fluid, spatial_scheme, vortex_scheme, thermoflux_scheme, viscosity_scheme,
+                    boundary_conditions))
 
 Fully compressible binary fluid in a 2D box (x, z): prognostic m = (ρ, ρ consvar, ρ q) at cell centres and the
-velocity (u, w) on faces. `spatial_scheme` (default `Centred2()`) sets the averages and differences of the C-grid,
+velocity (u, w) on faces. `spatial_scheme` (e.g. `Centred2()`) sets the interpolations and differences of the C-grid,
 `vortex_scheme` the vortex force.
 """
 struct FC2D{F, Manager, Domain<:Box2D, Boundary<:BoxBoundaryConditions, Fluid, Spatial<:SpatialScheme, Vortex<:VortexScheme, ThermoFlux<:ThermoFluxScheme{F}}
@@ -64,8 +64,8 @@ struct FC2D{F, Manager, Domain<:Box2D, Boundary<:BoxBoundaryConditions, Fluid, S
     inv_dz::F
 end
 function FC2D(params)
-    (; mgr, domain, space, fluid, vortex_scheme, thermoflux_scheme, viscosity_scheme, boundary_conditions) = params
-    spatial_scheme = get(params, :spatial_scheme, Centred2())
+    (; mgr, domain, space, fluid, spatial_scheme, vortex_scheme, thermoflux_scheme, viscosity_scheme, boundary_conditions) = params
+    check_halo(domain, spatial_scheme)
     Mx, Mz = CFBoxes.dims(domain)
     dx, dz = space.Lx / Mx, space.Lz / Mz
     check_tracers(boundary_conditions, 2)       # tracers (consvar, q)

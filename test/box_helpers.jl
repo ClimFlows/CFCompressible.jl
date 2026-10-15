@@ -32,14 +32,12 @@ copy_state(s) = map(copy, s)
 relerr(a, b) = maximum(abs, a .- b) / max(maximum(abs, b), floatmin())
 
 # interior index ranges: cells, x-faces (u) and z-faces (w), including walls in bounded directions
-cells(d)  = (xrange_interior(d), zrange_interior(d))
-ufaces(d) = (faces(boundary_topology(d)[1], xrange_interior(d)), zrange_interior(d))
-wfaces(d) = (xrange_interior(d), faces(boundary_topology(d)[2], zrange_interior(d)))
-faces(::Periodic, cells) = cells
-faces(::Bounded, cells) = first(cells):last(cells)+1
+interior_xz(d) = (interior_cells(d, 1), interior_cells(d, 2))
+interior_Xz(d) = (interior_faces(d, 1), interior_cells(d, 2))
+interior_xZ(d) = (interior_cells(d, 1), interior_faces(d, 2))
 
 # x-index of the face east of cell i, wrapping periodically (never reads the halo)
-east(d, i) = boundary_topology(d)[1] isa Periodic && i == last(xrange_interior(d)) ? first(xrange_interior(d)) : i + 1
+east(d, i) = boundary_topology(d)[1] isa Periodic && i == last(interior_cells(d, 1)) ? first(interior_cells(d, 1)) : i + 1
 
 # periodic x-halo fill for any array whose first dimension is x (cells, u- or w-points)
 function fill_xhalo!(a, d)
@@ -79,7 +77,7 @@ end
 
 # compare two tendencies on interior points only
 function tendency_mismatch(a, b, d)
-    (ic, jc), (iu, ju), (iw, jw) = cells(d), ufaces(d), wfaces(d)
+    (ic, jc), (iu, ju), (iw, jw) = interior_xz(d), interior_Xz(d), interior_xZ(d)
     return max(relerr(a.m[ic, jc, :], b.m[ic, jc, :]),
                relerr(a.u[iu, ju], b.u[iu, ju]),
                relerr(a.w[iw, jw], b.w[iw, jw]))
@@ -118,9 +116,9 @@ function test_memory_safety(tend!, model, state; reuse = true)
     end
 
     # the state interior is not modified (bitwise)
-    @test s.m[cells(d)..., :] == state.m[cells(d)..., :]
-    @test s.u[ufaces(d)...] == state.u[ufaces(d)...]
-    @test s.w[wfaces(d)...] == state.w[wfaces(d)...]
+    @test s.m[interior_xz(d)..., :] == state.m[interior_xz(d)..., :]
+    @test s.u[interior_Xz(d)...] == state.u[interior_Xz(d)...]
+    @test s.w[interior_xZ(d)...] == state.w[interior_xZ(d)...]
 end
 
 function test_symmetries(tend!, model, state; tol = 1e-8)   # round-off from cancellation in B; index bugs give O(1e-3–1)
@@ -137,13 +135,13 @@ function test_walls(tend!, model, state; tol = 1e-12)
     Bx, Bz = boundary_topology(d)
     dstate, _ = evaluate(tend!, model, state)
     if Bz isa Bounded
-        iw, jw = wfaces(d)
+        iw, jw = interior_xZ(d)
         scale = max(maximum(abs, dstate.w[iw, jw]), floatmin())
         @test maximum(abs, dstate.w[iw, first(jw)]) / scale < tol   # bottom wall
         @test maximum(abs, dstate.w[iw, last(jw)]) / scale < tol    # top wall
     end
     if Bx isa Bounded
-        iu, ju = ufaces(d)
+        iu, ju = interior_Xz(d)
         scale = max(maximum(abs, dstate.u[iu, ju]), floatmin())
         @test maximum(abs, dstate.u[first(iu), ju]) / scale < tol   # left wall
         @test maximum(abs, dstate.u[last(iu), ju]) / scale < tol    # right wall
@@ -154,7 +152,7 @@ end
 # conservative variable; `tracers = (; mass, consvar, q)` gives their indices in m (mass = nothing if not prognostic)
 function test_conservation(tend!, model, state, (; mass, consvar, q); tol = 1e-12)
     d = model.domain
-    (ic, jc), (; dx, dz) = cells(d), model
+    (ic, jc), (; dx, dz) = interior_xz(d), model
     dstate, scratch = evaluate(tend!, model, state)
     (; consflux_x, consflux_z, qflux_x, qflux_z, σ_cons) = scratch.irreversible
     inflow(Jx, Jz) = sum(Jx[first(ic), j] - Jx[last(ic)+1, j] for j in jc) / dx + sum(Jz[i, first(jc)] - Jz[i, last(jc)+1] for i in ic) / dz
@@ -201,7 +199,7 @@ function test_integration(model, state, dt, nsteps, cell_energies, conserved, ki
     s = integrate(model, state, dt, nsteps)
     @test all_finite(s)
     for k in conserved
-        @test abs(sum(s.m[cells(d)..., k]) / sum(state.m[cells(d)..., k]) - 1) < 1e-13
+        @test abs(sum(s.m[interior_xz(d)..., k]) / sum(state.m[interior_xz(d)..., k]) - 1) < 1e-13
     end
     ΔE = sum(cell_energies(model, s)) - sum(cell_energies(model, state))
     @test abs(ΔE) / kinetic(model, state) < tol_E
@@ -242,7 +240,7 @@ function test_diagnostics((; book, internal, info), tend!, model, state, fluid_p
     session = open(book; state, dstate, scratch, model)
     (; ∂u_z, ∂w_x, ∂u_x, ∂w_z) = scratch.derivatives
     (; consflux_x, consflux_z) = scratch.irreversible
-    ic, jc = cells(model.domain)
+    ic, jc = interior_xz(model.domain)
     @test CookBooks.get(session, :vorticity) == ∂u_z .- ∂w_x
     @test CookBooks.get(session, :divergence) == ∂u_x .+ ∂w_z
     @test CookBooks.get(session, :div_consflux)[ic, jc] ≈
@@ -263,7 +261,7 @@ function wall_input(model, scratch, d, s)
     (; domain, dx, dz) = model
     (; conjvar, chempot) = scratch.thermo
     (; consflux_x, consflux_z, qflux_x, qflux_z, uτ_x, uτ_z) = scratch.irreversible
-    (ic, jc) = cells(domain)
+    (ic, jc) = interior_xz(domain)
     sign = s == 1 ? 1 : -1                                  # flux along +x/+z enters through the lower wall
     if d == 1
         I, i = s == 1 ? (first(ic), first(ic)) : (last(ic) + 1, last(ic))

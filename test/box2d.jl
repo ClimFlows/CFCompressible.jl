@@ -50,7 +50,7 @@ function fc_model(; Mx = 32, Mz = 16, mgr = mgr, vortex_scheme = VortexEnergyCon
                    boundary = (Periodic, Bounded), walls = (; bottom = closed_wall(), top = closed_wall()))
     domain = test_box(Mx, Mz; boundary)
     boundary_conditions = BoxBoundaryConditions(domain; walls...)
-    return FC2D((; mgr, domain, space, fluid, vortex_scheme, thermoflux_scheme,
+    return FC2D((; mgr, domain, space, fluid, spatial_scheme = Centred2(), vortex_scheme, thermoflux_scheme,
         viscosity_scheme = ViscosityScheme(dyn_visc = 1e-3, bulk_visc = 1e-3), boundary_conditions))
 end
 
@@ -65,12 +65,12 @@ function fc_state(model; active = true)
     ρ(x, z) = ρ0 * (1 + g * (Lz - z) / c² + a * 1e-4 * sin(2π * x / Lx + 0.7) * cos(π * z / Lz))
     θ(x, z) = active ? θ_active(x, z) : θ_rest(z)
     q(x, z) = active ? q_active(x, z) : q_rest(z)
-    x(i) = xpoint(domain, dx, i); z(j) = zpoint(domain, dz, j)
-    X(I) = Xpoint(domain, dx, I); Z(J) = Zpoint(domain, dz, J)
+    x(i) = cellpoint(domain, dx, 1, i); z(j) = cellpoint(domain, dz, 2, j)
+    X(I) = facepoint(domain, dx, 1, I); Z(J) = facepoint(domain, dz, 2, J)
 
-    m = alloc_xz(Float64, domain, 3)
-    u = alloc_Xz(Float64, domain)
-    w = alloc_xZ(Float64, domain)
+    m = alloc(Float64, domain, (Cell(), Cell()), 3)
+    u = alloc(Float64, domain, (Face(), Cell()))
+    w = alloc(Float64, domain, (Cell(), Face()))
     for i in axes(m, 1), j in axes(m, 2)
         r = ρ(x(i), z(j))
         m[i, j, 1] = r
@@ -84,28 +84,28 @@ function fc_state(model; active = true)
         w[i, J] = a * 0.5U * sin(π * Z(J) / Lz) * cos(2π * x(i) / Lx + 0.2)
     end
     # impermeable walls
-    boundary_topology(domain)[2] isa Bounded && (w[:, wfaces(domain)[2][[1, end]]] .= 0)
-    boundary_topology(domain)[1] isa Bounded && (u[ufaces(domain)[1][[1, end]], :] .= 0)
+    boundary_topology(domain)[2] isa Bounded && (w[:, interior_xZ(domain)[2][[1, end]]] .= 0)
+    boundary_topology(domain)[1] isa Bounded && (u[interior_Xz(domain)[1][[1, end]], :] .= 0)
     return (; m, u, w)
 end
 
-# per-cell energy ΔxΔz ρ (K + e(v, θ, q) + Φ), with e = h - p v and K = (avg_x u² + avg_z w²) / 2
+# per-cell energy ΔxΔz ρ (K + e(v, θ, q) + Φ), with e = h - p v and K = (ℑ(u², (1,), (Cell(),)) + ℑ(w², (2,), (Cell(),))) / 2
 function fc_cell_energies(model, (; m, u, w))
     (; domain, dx, dz, fluid) = model
-    ic, jc = cells(domain)
+    ic, jc = interior_xz(domain)
     return [begin
         ρ, θ, q = m[i, j, 1], m[i, j, 2] / m[i, j, 1], m[i, j, 3] / m[i, j, 1]
         v = inv(ρ)
         p = fluid(:v, :consvar, :q).pressure(v, θ, q)
         e = fluid(:p, :consvar, :q).specific_enthalpy(p, θ, q) - p * v
         K = (u[i, j]^2 + u[east(domain, i), j]^2 + w[i, j]^2 + w[i, j+1]^2) / 4
-        ρ * (K + e + g * zpoint(domain, dz, j)) * dx * dz
+        ρ * (K + e + g * cellpoint(domain, dz, 2, j)) * dx * dz
     end for i in ic, j in jc]
 end
 
 function fc_kinetic(model, (; m, u, w))
     (; domain, dx, dz) = model
-    ic, jc = cells(domain)
+    ic, jc = interior_xz(domain)
     return sum(m[i, j, 1] * (u[i, j]^2 + u[east(domain, i), j]^2 + w[i, j]^2 + w[i, j+1]^2) / 4 * dx * dz for i in ic, j in jc)
 end
 
@@ -120,7 +120,7 @@ const forced_box = (;
 function fc_divergence(model, (; m, u, w))
     (; domain, dx, dz) = model
     ρ = view(m, :, :, 1)
-    ic, jc = cells(domain)
+    ic, jc = interior_xz(domain)
     ρu(I, j) = u[I, j] * (ρ[I-1, j] + ρ[I, j]) / 2
     ρw(i, J) = w[i, J] * (ρ[i, J-1] + ρ[i, J]) / 2
     div = [(ρu(east(domain, i), j) - ρu(i, j)) / dx + (ρw(i, j+1) - ρw(i, j)) / dz for i in ic, j in jc]
@@ -174,16 +174,16 @@ end
         consvar, q = (x, z) -> θ_rest(z), (x, z) -> q_rest(z)
         s = CFCompressible.initialize(model; density = CFCompressible.balanced_density(model; consvar, q, ptop = 1e5), consvar, q)
         ds, scratch = evaluate(fc_tend!, model, s)
-        (ic, jc) = cells(model.domain)
+        (ic, jc) = interior_xz(model.domain)
         @test maximum(abs, scratch.thermo.p[ic, last(jc)] .- 1e5) < 1e-9
-        @test maximum(abs, ds.w[wfaces(model.domain)...]) < momentum_roundoff(model)
-        @test maximum(abs, ds.u[ufaces(model.domain)...]) < momentum_roundoff(model)
+        @test maximum(abs, ds.w[interior_xZ(model.domain)...]) < momentum_roundoff(model)
+        @test maximum(abs, ds.u[interior_Xz(model.domain)...]) < momentum_roundoff(model)
         # perturbation from a streamfunction vanishing on all walls: ∇·(ρu) = 0 discretely, no flow through walls
         ψ(X, Z) = 1e-3 * ρ0 * U * Lz * sin(2π * X / Lx) * sin(π * Z / Lz)
         for m in (model, box)
             density = CFCompressible.balanced_density(m; consvar = θ_active, q = q_active, ptop = 1e5)
             u′, w′ = CFCompressible.divergence_free_velocity(m, density, ψ)
-            @test maximum(abs, w′[:, wfaces(m.domain)[2][[1, end]]]) < 1e-15 * maximum(abs, w′)
+            @test maximum(abs, w′[:, interior_xZ(m.domain)[2][[1, end]]]) < 1e-15 * maximum(abs, w′)
             s = CFCompressible.initialize(m; density, consvar = θ_active, q = q_active, velocity = (u′, w′))
             div, scale = fc_divergence(m, s)
             @test all_finite(s) && maximum(abs, div) <= 1e-12 * scale
@@ -198,9 +198,9 @@ end
         test_diagnostics((; book = CFCompressible.diagnostics(model), internal = CFCompressible.internal_diagnostics(model),
                           info = CFCompressible.diagnostic_info(model)), fc_tend!, model, active, fluid_params)
         _, _, te = CFCompressible.energies!((void, void, void), active, model)
-        mass = sum(active.m[cells(model.domain)..., 1]) * model.dx * model.dz
+        mass = sum(active.m[interior_xz(model.domain)..., 1]) * model.dx * model.dz
         # the test energy uses Φ = g z, the diagnostics Φ = g (z - Lz)
-        @test sum(te[cells(model.domain)...]) * model.dx * model.dz ≈ sum(fc_cell_energies(model, active)) - g * Lz * mass rtol = 1e-12
+        @test sum(te[interior_xz(model.domain)...]) * model.dx * model.dz ≈ sum(fc_cell_energies(model, active)) - g * Lz * mass rtol = 1e-12
     end
 
     @testset "driver loop" begin

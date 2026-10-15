@@ -16,9 +16,9 @@ flow); `nothing` is the fluid at rest. The halo is set by the boundary condition
 """
 function initialize(model::FC2D{F}; density, consvar, q, velocity = nothing) where F
     (; domain, dx, dz) = model
-    x(i) = xpoint(domain, dx, i); z(j) = zpoint(domain, dz, j)
-    m = alloc_xz(F, domain, 3)
-    for i in axes(m, 1), j in zrange_interior(domain)
+    x(i) = cellpoint(domain, dx, 1, i); z(j) = cellpoint(domain, dz, 2, j)
+    m = alloc(F, domain, (Cell(), Cell()), 3)
+    for i in axes(m, 1), j in interior_cells(domain, 2)
         ρ = density[i, j]
         m[i, j, 1], m[i, j, 2], m[i, j, 3] = ρ, ρ * consvar(x(i), z(j)), ρ * q(x(i), z(j))
     end
@@ -29,7 +29,7 @@ end
 
 # initial velocity: a copy of the given face arrays, or zero (at rest)
 initial_velocity((u, w)::Tuple, F, domain) = (copy(u), copy(w))
-initial_velocity(::Nothing, F, domain) = (fill!(alloc_Xz(F, domain), 0), fill!(alloc_xZ(F, domain), 0))
+initial_velocity(::Nothing, F, domain) = (alloc(F, domain, (Face(), Cell())), alloc(F, domain, (Cell(), Face())))
 
 """
     ρ = balanced_density(model::FC2D; consvar, q, ptop)
@@ -40,10 +40,10 @@ pressure `ptop` [Pa] in the top cell.
 """
 function balanced_density(model::FC2D{F}; consvar, q, ptop) where F
     (; domain, dx, dz) = model
-    x(i) = xpoint(domain, dx, i); z(j) = zpoint(domain, dz, j)
-    jc = zrange_interior(domain)
-    ρ = alloc_xz(F, domain)
-    cons_column, q_column = zeros(F, zdim(domain)), zeros(F, zdim(domain))
+    x(i) = cellpoint(domain, dx, 1, i); z(j) = cellpoint(domain, dz, 2, j)
+    jc = interior_cells(domain, 2)
+    ρ = alloc(F, domain, (Cell(), Cell()))
+    cons_column, q_column = zeros(F, ncells(domain, 2)), zeros(F, ncells(domain, 2))
     for i in axes(ρ, 1)
         for j in jc
             cons_column[j], q_column[j] = consvar(x(i), z(j)), q(x(i), z(j))
@@ -63,13 +63,13 @@ wall vanishes where ψ is constant along it. Faces without two neighbouring cell
 """
 function divergence_free_velocity(model::FC2D{F}, ρ, ψ) where F
     (; domain, dx, dz) = model
-    X(I) = Xpoint(domain, dx, I); Z(J) = Zpoint(domain, dz, J)
-    u, w = fill!(alloc_Xz(F, domain), 0), fill!(alloc_xZ(F, domain), 0)
+    X(I) = facepoint(domain, dx, 1, I); Z(J) = facepoint(domain, dz, 2, J)
+    u, w = alloc(F, domain, (Face(), Cell())), alloc(F, domain, (Cell(), Face()))
     for I in 2:size(ρ, 1), j in axes(u, 2)
-        u[I, j] = (ψ(X(I), Z(j+1)) - ψ(X(I), Z(j))) / (dz * avg_X(ρ, I, j))
+        u[I, j] = (ψ(X(I), Z(j+1)) - ψ(X(I), Z(j))) / (dz * ℑ(ρ, (1,), (Face(),), I, j))
     end
     for i in axes(w, 1), J in 2:size(ρ, 2)
-        w[i, J] = -(ψ(X(i+1), Z(J)) - ψ(X(i), Z(J))) / (dx * avg_Z(ρ, i, J))
+        w[i, J] = -(ψ(X(i+1), Z(J)) - ψ(X(i), Z(J))) / (dx * ℑ(ρ, (2,), (Face(),), i, J))
     end
     return u, w
 end

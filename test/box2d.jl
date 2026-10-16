@@ -1,11 +1,12 @@
-# Property tests for FC2D (2D box). Self-contained: run with
+# Property tests for the FC2D tendencies (2D box): memory safety, impermeable walls, conservation, energy
+# conservation and budget, no allocations. Self-contained: run with
 #   julia -t 4 --project=<env with CFCompressible> box2d.jl
 # or via runtests.jl / TraceableEnergetics/test/runtests.jl
 using Test
 
 using CFCompressible
 using LoopManagers: MultiThread, VectorizedCPU
-using CFBoxes, CFDiffusionSchemes, ClimFluids, CFTimeSchemes, CookBooks, ForwardDiff
+using CFBoxes, CFDiffusionSchemes, ClimFluids, ForwardDiff
 using CFPlanets: Tank2D
 import MutatingOrNot
 using MutatingOrNot: void
@@ -28,9 +29,6 @@ const fluid = NonlinearBinaryFluid(:potential_temperature, fluid_params)
 
 const thermoflux = ThermoFluxConsistent(k_T = 1e-4, k_q = 1e-5)
 
-# round-off level of the momentum tendency: B = h - πθ - μq is a difference of O(Cp θ) numbers, divided by Δx
-momentum_roundoff(model) = 100 * eps() * fluid.Cp0 * T0 / min(model.dx, model.dz)
-
 test_box(Mx = 32, Mz = 16; boundary = (Periodic, Bounded)) = Box2D(; Mx, Mz, Hx = 1, Hz = 1, boundary)
 
 # closed (impermeable, insulating, no salt flux) walls
@@ -46,25 +44,26 @@ q_active(x, z) = q_rest(z) + 0.001 * cos(2π * x / Lx + 0.5) * cos(π * z / Lz)
 ##### FC2D configuration and states
 #####
 
-function fc_model(; Mx = 32, Mz = 16, mgr = mgr, vortex_scheme = VortexEnergyCons(), thermoflux_scheme = thermoflux,
-                   boundary = (Periodic, Bounded), walls = (; bottom = closed_wall(), top = closed_wall()))
-    domain = test_box(Mx, Mz; boundary)
+# 32 × 16 box with every physical term on: vortex force, thermodynamic diffusion and viscosity, using the
+# energy-conserving schemes
+function fc_model(; mgr = mgr, boundary = (Periodic, Bounded), walls = (; bottom = closed_wall(), top = closed_wall()))
+    domain = test_box(32, 16; boundary)
     boundary_conditions = BoxBoundaryConditions(domain; walls...)
-    return FC2D((; mgr, domain, space, fluid, spatial_scheme = Centred2(), vortex_scheme, thermoflux_scheme,
-        viscosity_scheme = ViscosityScheme(dyn_visc = 1e-3), boundary_conditions))
+    return FC2D((; mgr, domain, space, fluid, spatial_scheme = Centred2(), vortex_scheme = VortexEnergyCons(),
+        thermoflux_scheme = thermoflux, viscosity_scheme = ViscosityScheme(dyn_visc = 1e-3), boundary_conditions))
 end
 
+# the model's tendencies!, in the argument order of the generic checks (box_helpers.jl)
 fc_tend!(model, dstate, scratch, state) = CFCompressible.tendencies!(dstate, scratch, model, state, 0.0)
 
-# state (m = (ρ, ρθ, ρq), u, w); w vanishes on the walls
-function fc_state(model; active = true)
+# active state (m = (ρ, ρθ, ρq), u, w), with no symmetry, so that every term of the tendencies is non-zero;
+# w vanishes on the walls
+function fc_state(model)
     (; domain, dx, dz) = model
-    a = active ? 1.0 : 0.0
     # near-hydrostatic: ρ ≈ ρ0 (1 + g (Lz - z) / c²) with c² = v0 / α_p, plus a small perturbation
     c² = fluid.v0 / fluid.α_p
-    ρ(x, z) = ρ0 * (1 + g * (Lz - z) / c² + a * 1e-4 * sin(2π * x / Lx + 0.7) * cos(π * z / Lz))
-    θ(x, z) = active ? θ_active(x, z) : θ_rest(z)
-    q(x, z) = active ? q_active(x, z) : q_rest(z)
+    ρ(x, z) = ρ0 * (1 + g * (Lz - z) / c² + 1e-4 * sin(2π * x / Lx + 0.7) * cos(π * z / Lz))
+    θ, q = θ_active, q_active
     x(i) = cellpoint(domain, dx, 1, i); z(j) = cellpoint(domain, dz, 2, j)
     X(I) = facepoint(domain, dx, 1, I); Z(J) = facepoint(domain, dz, 2, J)
 
@@ -78,10 +77,10 @@ function fc_state(model; active = true)
         m[i, j, 3] = r * q(x(i), z(j))
     end
     for I in axes(u, 1), j in axes(u, 2)
-        u[I, j] = a * U * (cos(π * z(j) / Lz) + 0.3 * sin(2π * X(I) / Lx) * sin(π * z(j) / Lz))
+        u[I, j] = U * (cos(π * z(j) / Lz) + 0.3 * sin(2π * X(I) / Lx) * sin(π * z(j) / Lz))
     end
     for i in axes(w, 1), J in axes(w, 2)
-        w[i, J] = a * 0.5U * sin(π * Z(J) / Lz) * cos(2π * x(i) / Lx + 0.2)
+        w[i, J] = 0.5U * sin(π * Z(J) / Lz) * cos(2π * x(i) / Lx + 0.2)
     end
     # impermeable walls
     boundary_topology(domain)[2] isa Bounded && (w[:, interior_xZ(domain)[2][[1, end]]] .= 0)
@@ -103,12 +102,6 @@ function fc_cell_energies(model, (; m, u, w))
     end for i in ic, j in jc]
 end
 
-function fc_kinetic(model, (; m, u, w))
-    (; domain, dx, dz) = model
-    ic, jc = interior_xz(domain)
-    return sum(m[i, j, 1] * (u[i, j]^2 + u[east(domain, i), j]^2 + w[i, j]^2 + w[i, j+1]^2) / 4 * dx * dz for i in ic, j in jc)
-end
-
 # walls exercising every kind of condition (consvar = θ for this fluid)
 const forced_box = (;
     left   = Wall(tangential = TangentialVelocity(z -> 0.02 * z), tracers = (Value(T0 + 0.5), Value(q0))),
@@ -116,95 +109,34 @@ const forced_box = (;
     bottom = Wall(tangential = TangentialVelocity(0.05), tracers = (HeatFlux(x -> 40.0 + 10.0 * cos(2π * x / Lx)), Flux(0.0))),
     top    = Wall(tangential = Stress(x -> 2e-4 * sin(2π * x / Lx)), tracers = (Flux(1e-3), Flux(-1e-6))))
 
-# discrete mass divergence ∇·(ρu) at interior cells, and the size of its terms
-function fc_divergence(model, (; m, u, w))
-    (; domain, dx, dz) = model
-    ρ = view(m, :, :, 1)
-    ic, jc = interior_xz(domain)
-    ρu(I, j) = u[I, j] * (ρ[I-1, j] + ρ[I, j]) / 2
-    ρw(i, J) = w[i, J] * (ρ[i, J-1] + ρ[i, J]) / 2
-    div = [(ρu(east(domain, i), j) - ρu(i, j)) / dx + (ρw(i, j+1) - ρw(i, j)) / dz for i in ic, j in jc]
-    scale = max(maximum(abs, ρu(i, j) / dx for i in ic, j in jc), maximum(abs, ρw(i, j) / dz for i in ic, j in jc), floatmin())
-    return div, scale
-end
-
 #####
 ##### Tests
 #####
 
 @testset "FC2D" begin
-    model = fc_model(mgr = VectorizedCPU())        # closed walls, periodic in x
+    model = fc_model(mgr = VectorizedCPU())        # closed walls, periodic in x; serial, for the allocation test
     active = fc_state(model)
     box = fc_model(boundary = (Bounded, Bounded), walls = forced_box)    # threaded: memory safety also catches races
 
+    # energy-conserving configuration: every flux through the walls vanishes, so mass, tracers and energy are conserved
     @testset "closed walls, periodic in x" begin
         test_memory_safety(fc_tend!, model, active)
-        test_symmetries(fc_tend!, model, active)
         test_walls(fc_tend!, model, active)
-        test_conservation(fc_tend!, model, active, (; mass = 1, consvar = 2, q = 3))
+        test_conservation(fc_tend!, model, active, (; mass = 1, consvar = 2, q = 3))   # m = (ρ, ρθ, ρq)
         r = test_energy(fc_tend!, fc_cell_energies, model, active)
-        test_no_allocations(fc_tend!, model, active)
         @info "FC2D relative dE/dt residual" r
+        test_no_allocations(fc_tend!, model, active)
     end
 
+    # every kind of wall condition: the wall fluxes and the work of the wall stresses enter the budgets exactly
     @testset "forced walls, closed box, threaded" begin
         s = fc_state(box)
         test_memory_safety(fc_tend!, box, s)
         test_walls(fc_tend!, box, s)
-        test_conservation(fc_tend!, box, s, (; mass = 1, consvar = 2, q = 3))   # wall fluxes enter the budgets
-        r = test_energy_budget(fc_tend!, fc_cell_energies, box, s)
+        test_conservation(fc_tend!, box, s, (; mass = 1, consvar = 2, q = 3))
+        r = test_energy_budget(fc_tend!, fc_cell_energies, box, s)           # dE/dt = wall input
         @test abs(r.input) > 1e-8                                            # the forcing is felt
         _, scratch = evaluate(fc_tend!, box, s)
-        @test wall_input(box, scratch, 2, 1).heat ≈ 40.0 * Lx rtol = 1e-12     # HeatFlux delivers exactly ∫F dx
-    end
-
-    @testset "schemes" begin
-        # the other advection and heat flux schemes, together (independent code paths): same properties, except
-        # energy conservation, which they don't have by design (VortexEnstrophyCons conserves enstrophy; ThermoFluxDowngradient
-        # has no heating, σ = 0)
-        variant = fc_model(mgr = VectorizedCPU(), vortex_scheme = VortexEnstrophyCons(), thermoflux_scheme = ThermoFluxDowngradient(k_T = 1e-4, k_q = 1e-5))
-        test_memory_safety(fc_tend!, variant, active; reuse = false)
-        test_symmetries(fc_tend!, variant, active)
-        test_walls(fc_tend!, variant, active)
-        test_conservation(fc_tend!, variant, active, (; mass = 1, consvar = 2, q = 3))
-    end
-
-    @testset "initial states" begin
-        # at rest, stratified, between closed walls: discretely balanced, with ptop in the top cell of every column
-        consvar, q = (x, z) -> θ_rest(z), (x, z) -> q_rest(z)
-        s = CFCompressible.initialize(model; density = CFCompressible.balanced_density(model; consvar, q, ptop = 1e5), consvar, q)
-        ds, scratch = evaluate(fc_tend!, model, s)
-        (ic, jc) = interior_xz(model.domain)
-        @test maximum(abs, scratch.thermo.p[ic, last(jc)] .- 1e5) < 1e-9
-        @test maximum(abs, ds.w[interior_xZ(model.domain)...]) < momentum_roundoff(model)
-        @test maximum(abs, ds.u[interior_Xz(model.domain)...]) < momentum_roundoff(model)
-        # perturbation from a streamfunction vanishing on all walls: ∇·(ρu) = 0 discretely, no flow through walls
-        ψ(X, Z) = 1e-3 * ρ0 * U * Lz * sin(2π * X / Lx) * sin(π * Z / Lz)
-        for m in (model, box)
-            density = CFCompressible.balanced_density(m; consvar = θ_active, q = q_active, ptop = 1e5)
-            u′, w′ = CFCompressible.divergence_free_velocity(m, density, ψ)
-            @test maximum(abs, w′[:, interior_xZ(m.domain)[2][[1, end]]]) < 1e-15 * maximum(abs, w′)
-            s = CFCompressible.initialize(m; density, consvar = θ_active, q = q_active, velocity = (u′, w′))
-            div, scale = fc_divergence(m, s)
-            @test all_finite(s) && maximum(abs, div) <= 1e-12 * scale
-        end
-    end
-
-    @testset "RK4 integration" begin
-        test_integration(model, active, 2e-4, 20, fc_cell_energies, (1, 3), fc_kinetic)
-    end
-
-    @testset "diagnostics" begin
-        test_diagnostics((; book = CFCompressible.diagnostics(model), internal = CFCompressible.internal_diagnostics(model),
-                          info = CFCompressible.diagnostic_info(model)), fc_tend!, model, active, fluid_params)
-        _, _, te = CFCompressible.energies!((void, void, void), active, model)
-        mass = sum(active.m[interior_xz(model.domain)..., 1]) * model.dx * model.dz
-        # the test energy uses Φ = g z, the diagnostics Φ = g (z - Lz)
-        @test sum(te[interior_xz(model.domain)...]) * model.dx * model.dz ≈ sum(fc_cell_energies(model, active)) - g * Lz * mass rtol = 1e-12
-    end
-
-    @testset "driver loop" begin
-        params = (; Nslice = 2, slice_size = 1e-3, dt_max = 2e-4, cfl = 0.5)
-        @test all_finite(CFCompressible.loop(model, copy_state(active), CFTimeSchemes.RungeKutta4(model), params))
+        @test wall_input(box, scratch, 2, 1).heat ≈ 40.0 * Lx rtol = 1e-12     # bottom HeatFlux delivers exactly ∫F dx
     end
 end

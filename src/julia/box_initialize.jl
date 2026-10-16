@@ -22,7 +22,7 @@ function initialize(model::FC2D{F}; density, consvar, q, velocity = nothing) whe
         ρ = density[i, j]
         m[i, j, 1], m[i, j, 2], m[i, j, 3] = ρ, ρ * consvar(x(i), z(j)), ρ * q(x(i), z(j))
     end
-    fill_halo!(m, domain, ZeroGradient())
+    fill_halo!(domain, m, ZeroGradient())
     u, w = initial_velocity(velocity, F, mgr, domain)
     return state_bc!(model, (; m, u, w))
 end
@@ -51,7 +51,7 @@ function balanced_density(model::FC2D{F}; consvar, q, ptop) where F
         end
         ρ[i, :] .= balanced_column(model, cons_column, q_column, ptop, jc)
     end
-    return fill_halo!(ρ, domain, ZeroGradient())
+    return fill_halo!(domain, ρ, ZeroGradient())
 end
 
 """

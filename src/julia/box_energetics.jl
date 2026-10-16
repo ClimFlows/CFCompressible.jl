@@ -29,7 +29,7 @@ function kinetic_energy!(ke_, (; m, u, w), model::FC2D{F}) where {F}
             ke[i, j] = 0.5 * m[i, j, 1] * (ℑ((u, u), (1,), (Cell(),), i, j) + ℑ((w, w), (2,), (Cell(),), i, j))
         end
     end
-    periodize!(model, ke)
+    periodize!(domain, ke)
     return ke
 end
 

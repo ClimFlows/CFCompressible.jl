@@ -16,6 +16,8 @@ using ManagedLoops: @with, @vec
 using CFBoxes: interior_cells, fill_halo!, ZeroGradient, alloc, operators, Face, Cell
 
 using ..CFCompressible.Dynamics: FCE_tendencies!
+import ..CFCompressible: diagnostics, internal_diagnostics, diagnostic_info, describe_diagnostics
+using ..CFCompressible: FC2D
 
 
 #======================= FCE Diagnostics =======================#
@@ -144,20 +146,28 @@ function masses(sphere::VoronoiSphere, model, state)
 end
 
 # ======================= FC2D Diagnostics =======================#
-#
-# Every diagnostic is a full array with a defined halo (from the state and the tendency scratch, or a zero-gradient
-# halo), on the grid location given by `diagnostic_info_FC2D` ((Cell(), Cell()) cells, (Face(), Cell()) u-faces, (Cell(), Face()) w-faces, (Face(), Face()) vertices).
-# Names are shared with AN2D. Derived fields use the operators of `model.spatial_scheme`. For plotting,
-# `interior(domain, field)` strips the halo and `coordinates(domain, (dx, dz), location)` gives the points.
 
-# CookBook of the FC2D diagnostics, opened with `open(book; state, dstate, scratch, model)`. Build the book once and
-# reuse it: it owns the output array of each computed diagnostic, allocated on its grid location on first use, which
-# every session of the book overwrites. The other diagnostics are the arrays (or views) of the state, tendency and scratch. Copy a result
-# to keep it beyond the next session.
-diagnostics_FC2D(model) = let (; mgr, domain, dx) = model, info = diagnostic_info_FC2D(), cache = Dict{Symbol, Any}()
-    # output array of the computed diagnostic `name`, on its grid location (see `diagnostic_info_FC2D`), allocated on
-    # first use
-    out(name) = get!(() -> alloc(typeof(dx), mgr, domain, info[name].location), cache, name)::Matrix{typeof(dx)}
+#=
+Every diagnostic is a full array with a defined halo (from the state and the tendency scratch, or a zero-gradient
+halo), on the grid location given by `diagnostic_info`: (Cell(), Cell()) cells, (Face(), Cell()) u-faces,
+(Cell(), Face()) w-faces, (Face(), Face()) vertices. Names are shared with AN2D. Derived fields use the operators of
+`model.spatial_scheme`. For plotting, `interior(domain, field)` strips the halo and
+`coordinates(domain, (dx, dz), location)` gives the points.
+=#
+
+"""
+    book = diagnostics(model::FC2D)
+
+`CookBook` of the FC2D diagnostics, opened with `open(book; state, dstate, scratch, model)`. Names, long names and
+units: see `diagnostic_info` (or `describe_diagnostics(model)`). Debugging intermediates: `internal_diagnostics`.
+
+Build the book once and reuse it: it owns the output array of each computed diagnostic, allocated on its grid location
+on first use, which every session of the book overwrites. The other diagnostics are the arrays (or views) of the
+state, tendency and scratch. Copy a result to keep it beyond the next session.
+"""
+diagnostics(model::FC2D{F}) where F = let (; mgr, domain) = model, info = diagnostic_info(model), cache = Dict{Symbol, Any}()
+    # output array of the computed diagnostic `name`, on its grid location (see `diagnostic_info`), allocated on first use
+    out(name) = get!(() -> alloc(F, mgr, domain, info[name].location), cache, name)::Matrix{F}
     CookBook(;
         # state
         conservative_variable            = scratch -> scratch.thermo.consvar,
@@ -204,17 +214,26 @@ diagnostics_FC2D(model) = let (; mgr, domain, dx) = model, info = diagnostic_inf
     )
 end
 
-# CookBook of intermediates of the FC2D tendencies, for debugging: the vortex force ω×u = (vortex_x, vortex_z) of the
-# advection, the advective fluxes mu, mw (third index: ρ, ρ consvar, ρ q)
-internal_diagnostics_FC2D() = CookBook(;
+"""
+    book = internal_diagnostics(model::FC2D)
+
+`CookBook` of intermediates of the FC2D tendencies, for debugging: the vortex force ω×u = (vortex_x, vortex_z) of the
+advection, the advective fluxes mu, mw (third index: ρ, ρ consvar, ρ q).
+"""
+internal_diagnostics(::FC2D) = CookBook(;
     vortex_x = scratch -> scratch.advection.vortex_x,
     vortex_z = scratch -> scratch.advection.vortex_z,
     mu       = scratch -> scratch.advection.mu,
     mw       = scratch -> scratch.advection.mw,
 )
 
-# long name and units of each FC2D diagnostic
-diagnostic_info_FC2D() = (;
+"""
+    info = diagnostic_info(model::FC2D)
+
+Long name, units and grid location of each diagnostic of `diagnostics(model)`, as a named tuple of
+`(; long_name, units, location)`.
+"""
+diagnostic_info(::FC2D) = (;
     conservative_variable            = (long_name = "conservative variable",                                              units = "consvar",              location = (Cell(), Cell())),
     composition                      = (long_name = "composition (solute mass fraction)",                                 units = "kg/kg",                location = (Cell(), Cell())),
     u                                = (long_name = "horizontal velocity",                                                units = "m s⁻¹",                location = (Face(), Cell())),
@@ -254,8 +273,22 @@ diagnostic_info_FC2D() = (;
     dw                               = (long_name = "tendency of w",                                                      units = "m s⁻²",                location = (Cell(), Face())),
 )
 
-# out = f(a, b[, c]) pointwise on arrays of the same grid, halo included
+"""
+    describe_diagnostics(model::FC2D)
+
+Print the name, long name and units of each diagnostic.
+"""
+describe_diagnostics(model::FC2D) = foreach(pairs(diagnostic_info(model))) do (name, (; long_name, units))
+    println(rpad(name, 34), rpad(long_name, 52), units)
+end
+
+"""
+    out = pointwise!(out, mgr, f, a, b[, c])
+
+out = f(a, b[, c]) pointwise on arrays of the same grid, halo included, by the manager `mgr`.
+"""
 function pointwise!(out, mgr, f::Fun, a, b) where Fun
+    # `Fun` makes the method specialize on `f`, which the loop closure of `@with` captures without calling
     @with mgr, let (irange, jrange) = (axes(out, 1), axes(out, 2))
         @inbounds @vec for i in irange, j in jrange
             out[i, j] = f(a[i, j], b[i, j])
@@ -272,8 +305,12 @@ function pointwise!(out, mgr, f::Fun, a, b, c) where Fun
     return out
 end
 
-# divergence of a vector (Vx, Vz) on the faces, at the cells: δ_x Vx / Δx + δ_z Vz / Δz on the interior cells;
-# zero-gradient halo
+"""
+    div = divergence_field!(div, model, Vx, Vz)
+
+Divergence of a vector (Vx, Vz) on the faces, at the cells: δx Vx / Δx + δz Vz / Δz on the interior cells, with a
+zero-gradient halo.
+"""
 function divergence_field!(div, model, Vx, Vz)
     (; mgr, domain, inv_dx, inv_dz) = model
     (; δ) = operators(model.spatial_scheme)

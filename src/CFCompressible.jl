@@ -44,23 +44,36 @@ end
     model = FC2D((; mgr, domain, space, fluid, spatial_scheme, vortex_scheme, thermoflux_scheme, viscosity_scheme,
                     boundary_conditions))
 
-Fully compressible binary fluid in a 2D box (x, z): prognostic m = (ρ, ρ consvar, ρ q) at cell centres and the
+Fully compressible binary fluid in a 2D box (x, z): prognostic m = (ρ, ρ consvar, ρ q) at cell centers and the
 velocity (u, w) on faces. `spatial_scheme` (e.g. `Centred2()`) sets the interpolations and differences of the C-grid,
 `vortex_scheme` the vortex force.
 """
 struct FC2D{F, Manager, Domain<:Box2D, Boundary<:BoxBoundaryConditions, Fluid, Spatial<:SpatialScheme, Vortex<:VortexScheme, ThermoFlux<:ThermoFluxScheme{F}}
+    "loop manager running the kernels (e.g. `MultiThread(VectorizedCPU())`), or `nothing`"
     mgr::Manager
+    "the box (grid sizes, halo widths, topology)"
     domain::Domain
+    "the physical box: lengths Lx, Lz [m] and gravity g [m s⁻²]"
     space::Tank2D{F}
+    "wall conditions, discretized on the grid"
     boundary::Boundary
+    "equation of state of the binary fluid"
     fluid::Fluid
+    "interpolations and differences of the C-grid (`operators`)"
     spatial_scheme::Spatial
+    "discretization of the vortex force ω×u"
     vortex_scheme::Vortex
+    "diffusion of consvar and q (coefficients k_T, k_q [m² s⁻¹])"
     thermoflux::ThermoFlux
+    "viscosity (dynamic viscosity μ [Pa s])"
     viscosity::ViscosityScheme{F}
+    "grid spacing along x [m]"
     dx::F
+    "grid spacing along z [m]"
     dz::F
+    "1/dx [m⁻¹]"
     inv_dx::F
+    "1/dz [m⁻¹]"
     inv_dz::F
 end
 function FC2D(params)
@@ -85,11 +98,7 @@ function FCE_tendencies! end
 """
 tendencies!(slow, fast, scratch, model::FCE, state, _, tau) = FCE_tendencies!(slow, fast, scratch, model, model.domain.layer, state, tau)
 
-"""
-    dstate, scratch = tendencies!(dstate, scratch, model, state, t)
-"""
-tendencies!(dstate, scratch, model::FC2D, state, t) = BoxDynamics.FC2D_tendencies!(dstate, scratch, model, state, t)
-CFTimeSchemes.tendencies!(dstate, scratch, model::FC2D, state, t) = BoxDynamics.FC2D_tendencies!(dstate, scratch, model, state, t)
+# the FC2D methods of tendencies! are in `box_dynamics.jl`
 
 # vertical remap
 """
@@ -120,7 +129,8 @@ divergence_free_velocity(model::FC2D, ρ, ψ) = BoxInitialize.divergence_free_ve
 
 # specify main time integration loop
 """
-    state = loop(model::FC2D, state, time_scheme, params; outputs = nothing)
+    state = loop(state, model::FC2D, time_scheme, params; outputs = nothing)
+
 Main time integration loop for the FC2D model; advances `state` in place and returns it.
 - `model`: FC2D model instance
 - `state`: initial state (see `initialize`), overwritten by the final state; copy it first to keep it
@@ -132,24 +142,22 @@ Main time integration loop for the FC2D model; advances `state` in place and ret
   time slice, with the diagnostics `book` and the time `t` [s] (e.g. to record diagnostics), then closed with
   `close(outputs)` when the run ends, even on error; `nothing` records nothing
 """
-loop(model::FC2D, state, time_scheme, params; kwargs...) = Loops.loop(model, state, time_scheme, params; kwargs...)
+loop(state, model::FC2D, time_scheme, params; kwargs...) = Loops.loop(state, model, time_scheme, params; kwargs...)
 
 # pointwise energies of FC2D
 """
-    ke, pe, te = energies!((ke, pe, te), state, model::FC2D)
+    ke, pe, te = energies!((ke, pe, te), model::FC2D, state)
 
-Kinetic, potential + internal, and total energy per unit volume at cell centres; see `BoxEnergetics.energies!`.
+Kinetic, potential + internal, and total energy per unit volume at cell centers; see `BoxEnergetics.energies!`.
 """
-energies!(energies, state, model::FC2D) = BoxEnergetics.energies!(energies, state, model)
+energies!(energies, model::FC2D, state) = BoxEnergetics.energies!(energies, model, state)
 
 # specify diagnostics for each model
 diagnostics(::FCE) = Diagnostics.diagnostics_FCE()
-diagnostics(model::FC2D) = Diagnostics.diagnostics_FC2D(model)
-internal_diagnostics(::FC2D) = Diagnostics.internal_diagnostics_FC2D()
-diagnostic_info(::FC2D) = Diagnostics.diagnostic_info_FC2D()
-describe_diagnostics(model::FC2D) = foreach(pairs(diagnostic_info(model))) do (name, (; long_name, units))
-    println(rpad(name, 34), rpad(long_name, 52), units)
-end
+# the FC2D methods of these are in `diagnostics.jl`
+function internal_diagnostics end
+function diagnostic_info end
+function describe_diagnostics end
 
 # include("julia/lazy_broadcast.jl")
 

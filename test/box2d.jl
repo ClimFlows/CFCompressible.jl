@@ -1,7 +1,9 @@
-# Property tests for the FC2D tendencies (2D box): memory safety, impermeable walls, conservation, energy
-# conservation and budget, no allocations. Self-contained: run with
-#   julia -t 4 --project=<env with CFCompressible> box2d.jl
-# or via runtests.jl / TraceableEnergetics/test/runtests.jl
+#=
+Property tests for the FC2D tendencies (2D box): memory safety, impermeable walls, conservation, energy
+conservation and budget, no allocations. Self-contained: run with
+  julia -t 4 --project=<env with CFCompressible> box2d.jl
+or via runtests.jl / TraceableEnergetics/test/runtests.jl
+=#
 using Test
 
 using CFCompressible
@@ -13,9 +15,7 @@ using MutatingOrNot: void
 
 include("box_helpers.jl")
 
-#####
-##### Configuration: small box, all physics switched on, closed (free-slip, insulating) walls
-#####
+# Configuration: small box, all physics switched on, closed (free-slip, insulating) walls
 
 const mgr = MultiThread(VectorizedCPU())
 const space = Tank2D(Lx = 1.0, Lz = 0.5, g = 10.0)
@@ -40,12 +40,12 @@ q_rest(z) = q0 - 0.002 * z / Lz
 θ_active(x, z) = θ_rest(z) + 0.3 * sin(2π * x / Lx) * cos(π * z / Lz) + 0.1 * cos(4π * x / Lx + 1) * sin(2π * z / Lz)
 q_active(x, z) = q_rest(z) + 0.001 * cos(2π * x / Lx + 0.5) * cos(π * z / Lz)
 
-#####
-##### FC2D configuration and states
-#####
+# FC2D configuration and states
 
-# 32 × 16 box with every physical term on: vortex force, thermodynamic diffusion and viscosity, using the
-# energy-conserving schemes
+#=
+32 × 16 box with every physical term on: vortex force, thermodynamic diffusion and viscosity, using the
+energy-conserving schemes
+=#
 function fc_model(; mgr = mgr, boundary = (Periodic, Bounded), walls = (; bottom = closed_wall(), top = closed_wall()))
     domain = test_box(32, 16; boundary)
     boundary_conditions = BoxBoundaryConditions(domain; walls...)
@@ -54,10 +54,12 @@ function fc_model(; mgr = mgr, boundary = (Periodic, Bounded), walls = (; bottom
 end
 
 # the model's tendencies!, in the argument order of the generic checks (box_helpers.jl)
-fc_tend!(model, dstate, scratch, state) = CFCompressible.tendencies!(dstate, scratch, model, state, 0.0)
+fc_tend!(dstate, scratch, model, state) = CFCompressible.tendencies!(dstate, scratch, model, state, 0.0)
 
-# active state (m = (ρ, ρθ, ρq), u, w), with no symmetry, so that every term of the tendencies is non-zero;
-# w vanishes on the walls
+#=
+active state (m = (ρ, ρθ, ρq), u, w), with no symmetry, so that every term of the tendencies is non-zero;
+w vanishes on the walls
+=#
 function fc_state(model)
     (; domain, dx, dz) = model
     # near-hydrostatic: ρ ≈ ρ0 (1 + g (Lz - z) / c²) with c² = v0 / α_p, plus a small perturbation
@@ -109,9 +111,7 @@ const forced_box = (;
     bottom = Wall(tangential = TangentialVelocity(0.05), tracers = (HeatFlux(x -> 40.0 + 10.0 * cos(2π * x / Lx)), Flux(0.0))),
     top    = Wall(tangential = Stress(x -> 2e-4 * sin(2π * x / Lx)), tracers = (Flux(1e-3), Flux(-1e-6))))
 
-#####
-##### Tests
-#####
+# Tests
 
 @testset "FC2D" begin
     model = fc_model(mgr = VectorizedCPU())        # closed walls, periodic in x; serial, for the allocation test

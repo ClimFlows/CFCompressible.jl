@@ -1,3 +1,9 @@
+"""
+    BoxInitialize
+
+Initial states of FC2D: the rest density in discrete hydrostatic balance (`balanced_density`), a discretely
+divergence-free velocity (`divergence_free_velocity`), and the state (`initialize`).
+"""
 module BoxInitialize
 
 using ..CFCompressible: FC2D
@@ -23,14 +29,19 @@ function initialize(model::FC2D{F}; density, consvar, q, velocity = nothing) whe
         m[i, j, 1], m[i, j, 2], m[i, j, 3] = ρ, ρ * consvar(x(i), z(j)), ρ * q(x(i), z(j))
     end
     fill_halo!(domain, m, ZeroGradient())
-    u, w = initial_velocity(velocity, F, mgr, domain)
-    return state_bc!(model, (; m, u, w))
+    u, w = initial_velocity(F, velocity, mgr, domain)
+    return state_bc!((; m, u, w), model)
 end
 
-# initial velocity: a copy of the given face arrays, or zero (at rest), in arrays placed by the manager (see `alloc`)
-initial_velocity((u, w)::Tuple, F, mgr, domain) =
+"""
+    u, w = initial_velocity(F, velocity, mgr, domain)
+
+Initial velocity of `initialize`, in arrays of eltype `F` placed by the manager (see `alloc`): a copy of the face
+arrays `velocity = (u, w)`, or zero (at rest) when `velocity` is `nothing`.
+"""
+initial_velocity(F, (u, w)::Tuple, mgr, domain) =
     (copyto!(alloc(F, mgr, domain, (Face(), Cell())), u), copyto!(alloc(F, mgr, domain, (Cell(), Face())), w))
-initial_velocity(::Nothing, F, mgr, domain) = (alloc(F, mgr, domain, (Face(), Cell())), alloc(F, mgr, domain, (Cell(), Face())))
+initial_velocity(F, ::Nothing, mgr, domain) = (alloc(F, mgr, domain, (Face(), Cell())), alloc(F, mgr, domain, (Cell(), Face())))
 
 """
     ρ = balanced_density(model::FC2D; consvar, q, ptop)
@@ -60,7 +71,7 @@ end
 Velocity on the faces with discretely divergence-free mass flux, ∇·(ρu) = 0 in every cell, for the density ρ (e.g.
 from `balanced_density`), from a mass streamfunction ψ(X, Z) [kg m⁻¹ s⁻¹] evaluated at the cell vertices:
 ρu = δ_z ψ / Δz on u-faces and ρw = -δ_x ψ / Δx on w-faces (ρ averaged from the two cells). The velocity through a
-wall vanishes where ψ is constant along it. Faces without two neighbouring cells (halo edges) are zero.
+wall vanishes where ψ is constant along it. Faces without two neighboring cells (halo edges) are zero.
 """
 function divergence_free_velocity(model::FC2D{F}, ρ, ψ) where F
     (; mgr, domain, dx, dz) = model
@@ -75,17 +86,25 @@ function divergence_free_velocity(model::FC2D{F}, ρ, ψ) where F
     return u, w
 end
 
-# Vertical momentum forcing - consvar ∂conjvar - q ∂chempot - ∂B on the face between cells a and b (b above a, at
-# inverse distance inv_d), from the densities (ρ, ρ consvar, ρ q) and (conjvar, chempot, B) of each cell: the
-# discrete forcing of `velocity_tendencies!` (BoxDynamics), written for one face; the two must agree.
+"""
+    forcing = face_forcing(inv_d, ρa, ra, qa, ρb, rb, qb, conj_a, chem_a, B_a, conj_b, chem_b, B_b)
+
+Vertical momentum forcing -consvar ∂conjvar - q ∂chempot - ∂B on the face between cells a and b (b above a, at
+inverse distance `inv_d`), from the densities (ρ, ρ consvar, ρ q) and (conjvar, chempot, B) of each cell.
+"""
 @inline function face_forcing(inv_d, ρa, ra, qa, ρb, rb, qb, conj_a, chem_a, B_a, conj_b, chem_b, B_b)
+    # the discrete forcing of `velocity_tendencies!` (BoxDynamics), written for one face: the two must agree
     v = inv(ρa + ρb)
     consvar, q = (ra + rb) * v, (qa + qb) * v
     return - inv_d * ((conj_b - conj_a) * consvar + (chem_b - chem_a) * q + (B_b - B_a))
 end
 
-# (conjvar, chempot, B) in a cell with density ρ, conservative variable cons and composition q, as in
-# `thermodynamics!` (BoxDynamics)
+"""
+    conj, chem, B = cell_thermo(fluid, ρ, cons, q)
+
+(conjvar, chempot, B) in a cell with density ρ, conservative variable `cons` and composition `q`, as in
+`thermodynamics!` (BoxDynamics).
+"""
 @inline function cell_thermo(fluid, ρ, cons, q)
     p = fluid(:v, :consvar, :q).pressure(inv(ρ), cons, q)
     conj = fluid(:p, :consvar, :q).conjugate_variable(p, cons, q)
@@ -94,9 +113,13 @@ end
     return conj, chem, B
 end
 
-# Densities ρ[j] of a column at rest in discrete balance: the vertical momentum forcing of the model vanishes on
-# every interior face, given the conservative variable and composition of the interior cells `jc`, and the pressure
-# `ptop` in the top cell. Marches down, solving for each density with secant iterations to round-off.
+"""
+    ρ = balanced_column(model::FC2D, consvar, q, ptop, jc)
+
+Densities ρ[j] of a column at rest in discrete balance: the vertical momentum forcing of the model vanishes on every
+interior face, given the conservative variable and composition of the interior cells `jc`, and the pressure `ptop`
+[Pa] in the top cell. Marches down, solving for each density with secant iterations to round-off.
+"""
 function balanced_column((; fluid, space, inv_dz), consvar, q, ptop, jc)
     (; g) = space
     ρ = similar(consvar)

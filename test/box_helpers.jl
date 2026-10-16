@@ -1,10 +1,13 @@
-#####
-##### Generic property checks shared by the anelastic and compressible tests (this file is mirrored by hand between
-##### CFAnelastics/test/helpers.jl and CFCompressible/test/box_helpers.jl)
-#####
+#=
+Generic property checks shared by the anelastic and compressible tests (this file is mirrored by hand between
+CFAnelastics/test/helpers.jl and CFCompressible/test/box_helpers.jl)
+=#
 
-# Fresh scratch arrays come from `CFBoxes.alloc!(void, …)` (or `MutatingOrNot.similar!(void, …)`). In the tests they
-# are filled with `ALLOC_FILL[]`, so that we can check that results never depend on the contents of new allocations.
+#=
+Fresh scratch arrays come from `CFBoxes.alloc!(void, …)` (or `MutatingOrNot.similar!(void, …)`). In the tests they
+are filled with `ALLOC_FILL[]`, so that we can check that results never depend on the contents of new allocations.
+These two methods are deliberate type piracy, confined to the tests.
+=#
 const ALLOC_FILL = Ref(0.0)
 MutatingOrNot.similar!(::MutatingOrNot.Void, y...) = fill!(similar(y...), ALLOC_FILL[])
 CFBoxes.alloc!(::MutatingOrNot.Void, F::Type, mgr, box::CFBoxes.AbstractBox, location::Tuple, dims...) =
@@ -38,20 +41,20 @@ interior_xZ(d) = (interior_cells(d, 1), interior_faces(d, 2))
 # x-index of the face east of cell i, wrapping periodically (never reads the halo)
 east(d, i) = boundary_topology(d)[1] isa Periodic && i == last(interior_cells(d, 1)) ? first(interior_cells(d, 1)) : i + 1
 
-# total and Σ|·| of the per-cell energy tendency dE/dt = d/dε E(state + ε dstate) at ε = 0, by forward-mode AD;
-# Σ|·| sets the round-off scale against which the total is compared
+#=
+total and Σ|·| of the per-cell energy tendency dE/dt = d/dε E(state + ε dstate) at ε = 0, by forward-mode AD;
+Σ|·| sets the round-off scale against which the total is compared
+=#
 function energy_tendency(cell_energies, model, state, dstate)
     perturbed(ε) = map((x, dx) -> x .+ ε .* dx, state, dstate)
     dE = ForwardDiff.derivative(ε -> cell_energies(model, perturbed(ε)), 0.0)
     return sum(dE), sum(abs, dE)
 end
 
-#####
-##### Test sets common to both models; `tend!(model, dstate, scratch, state)` wraps each model's tendencies!
-#####
+# Test sets common to both models; `tend!(dstate, scratch, model, state)` wraps each model's tendencies!
 
 # tendencies from freshly allocated, zero-filled scratch: only the memory-safety test sees other contents
-evaluate(tend!, model, state) = with_fill(() -> tend!(model, void, void, copy_state(state)), 0.0)
+evaluate(tend!, model, state) = with_fill(() -> tend!(void, void, model, copy_state(state)), 0.0)
 
 # tendencies never read memory they have not written, and never modify the state interior
 function test_memory_safety(tend!, model, state)
@@ -61,12 +64,12 @@ function test_memory_safety(tend!, model, state)
 
     # fresh allocations filled with NaN: any read of unwritten memory would leave a NaN or change the result
     s = copy_state(state)
-    out, scratch = with_fill(() -> tend!(model, void, void, s), NaN)
+    out, scratch = with_fill(() -> tend!(void, void, model, s), NaN)
     @test all_finite(out)
     @test all(map(isequal, out, ref))
 
     # re-using dstate and scratch from the previous call gives the same result (no stale accumulation)
-    out2, _ = tend!(model, out, scratch, copy_state(state))
+    out2, _ = tend!(out, scratch, model, copy_state(state))
     @test all(map(isequal, out2, ref))
 
     # the state interior is not modified (bitwise); the halo may be filled by the boundary conditions
@@ -94,8 +97,10 @@ function test_walls(tend!, model, state; tol = 1e-12)
     end
 end
 
-# Σ dm over the interior equals the net inflow through the walls (zero for the mass), plus Σ σ for the
-# conservative variable; `tracers = (; mass, consvar, q)` gives their indices in m (mass = nothing if not prognostic)
+#=
+Σ dm over the interior equals the net inflow through the walls (zero for the mass), plus Σ σ for the
+conservative variable; `tracers = (; mass, consvar, q)` gives their indices in m (mass = nothing if not prognostic)
+=#
 function test_conservation(tend!, model, state, (; mass, consvar, q); tol = 1e-12)
     d = model.domain
     (ic, jc), (; dx, dz) = interior_xz(d), model
@@ -119,23 +124,27 @@ function test_energy(tend!, cell_energies, model, state; tol = 1e-10)
     return abs(total) / scale
 end
 
-# time and allocations of a tendencies! call, behind a function barrier (the arguments come from `evaluate`, whose
-# result type is not inferred: a dynamic call would box them)
-function measure(tend!, model, dstate, scratch, s)
-    tend!(model, dstate, scratch, s)      # warm-up, compiles
-    return (@elapsed tend!(model, dstate, scratch, s)), (@allocated tend!(model, dstate, scratch, s))
+#=
+time and allocations of a tendencies! call, behind a function barrier (the arguments come from `evaluate`, whose
+result type is not inferred: a dynamic call would box them)
+=#
+function measure(tend!, dstate, scratch, model, s)
+    tend!(dstate, scratch, model, s)      # warm-up, compiles
+    return (@elapsed tend!(dstate, scratch, model, s)), (@allocated tend!(dstate, scratch, model, s))
 end
 
 # tendencies! allocates nothing once dstate and scratch exist (type-stable, serial manager)
 function test_no_allocations(tend!, model, state)
     dstate, scratch = evaluate(tend!, model, state)
-    t, bytes = measure(tend!, model, dstate, scratch, copy_state(state))
+    t, bytes = measure(tend!, dstate, scratch, model, copy_state(state))
     @info "$(nameof(typeof(model))) tendencies!" time_ms = 1e3t bytes
     @test bytes == 0
 end
 
-# energy input through the wall at side `s` (1 lower, 2 upper) of dimension `d`: thermal, Σ (conjvar consflux + chempot qflux)
-# into the fluid, and mechanical, the work of the wall stress given by the viscous energy flux uτ on the wall faces
+#=
+energy input through the wall at side `s` (1 lower, 2 upper) of dimension `d`: thermal, Σ (conjvar consflux + chempot qflux)
+into the fluid, and mechanical, the work of the wall stress given by the viscous energy flux uτ on the wall faces
+=#
 function wall_input(model, scratch, d, s)
     (; domain, dx, dz) = model
     (; conjvar, chempot) = scratch.thermo

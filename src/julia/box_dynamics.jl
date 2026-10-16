@@ -1,68 +1,81 @@
+"""
+    BoxDynamics
+
+Tendencies of FC2D (`tendencies!`), and the boundary conditions of its state and tendencies.
+"""
 module BoxDynamics
 
+import ..CFCompressible: tendencies!
 using ..CFCompressible: FC2D
+import CFTimeSchemes
 using CFPlanets: Tank2D
 using CFBoxes
 using CFBoxes: slice, across
 using CFDiffusionSchemes
 using ManagedLoops: @vec, @with
 
+#=
+Tendencies of FC2D,
+    ∂ₜm = -∇·(m u) - ∇·J + σ ẑ_consvar,   ∂ₜu = -consvar ∇conjvar - q ∇chempot - ∇B - g ẑ - ∇K - ω×u + F/ρ,
+with m = (ρ, ρ consvar, ρ q) at cell centers and (u, w) on faces. Averages and differences come from
+`operators(model.spatial_scheme)`.
+=#
 
-## TENDENCIES
-#
-# ∂ₜm = -∇·(m u) - ∇·J + σ ẑ_consvar,   ∂ₜu = -consvar ∇conjvar - q ∇chempot - ∇B - g ẑ - ∇K - ω×u + F/ρ,
-# with m = (ρ, ρ consvar, ρ q) at cell centres and (u, w) on faces. Averages and differences come from
-# `operators(model.spatial_scheme)`.
+"""
+    dstate, scratch = tendencies!(dstate, scratch, model::FC2D, state, t)
 
-function FC2D_tendencies!(dstate, scratch, model::FC2D, state, t)
+Tendencies `dstate = (; m, u, w)` of the FC2D model at `state`, and the `scratch` arrays of the intermediate fields,
+both allocated when `void` and overwritten otherwise. Also a method of `CFTimeSchemes.tendencies!`.
+"""
+function tendencies!(dstate, scratch, model::FC2D, state, t)
     (; vortex_scheme, thermoflux) = model
     # fill the halo of the state (never its interior) from the boundary conditions
-    state = state_bc!(model, state)
+    state = state_bc!(state, model)
 
-    ## THERMODYNAMICS; p, consvar, q, T, conjvar, chempot, Cp, ∂consvar/∂q, Γ, B
+    # Thermodynamics: p, consvar, q, T, conjvar, chempot, Cp, ∂consvar/∂q, Γ, B
     (; p, consvar, q, T, conjvar, chempot, Cp, ∂consvar_∂q, Γ, B) = scratch.thermo
 
     p, consvar, q, T, conjvar, chempot, Cp, ∂consvar_∂q, Γ, B =
         thermodynamics!((p, consvar, q, T, conjvar, chempot, Cp, ∂consvar_∂q, Γ, B), model, state)
     thermo = (; p, consvar, q, T, conjvar, chempot, Cp, ∂consvar_∂q, Γ, B)
 
-    ## KINEMATICS; ∂u/∂x, ∂w/∂z, ∂u/∂z, ∂w/∂x, K = (u² + w²) / 2
+    # Kinematics: ∂u/∂x, ∂w/∂z, ∂u/∂z, ∂w/∂x, K = (u² + w²) / 2
     (; ∂u_x, ∂w_z, ∂u_z, ∂w_x) = scratch.derivatives
     (; K) = scratch.advection
 
     ∂u_x, ∂w_z, ∂u_z, ∂w_x, K = kinematics!((∂u_x, ∂w_z, ∂u_z, ∂w_x, K), model, state)
 
-    ## ADVECTION; fluxes m u of the densities, vortex force ω×u = (vortex_x, vortex_z)
+    # Advection: fluxes m u of the densities, vortex force ω×u = (vortex_x, vortex_z)
     (; mu, mw, vortex_x, vortex_z, vortex_scratch) = scratch.advection
 
     mu, mw                 = advective_flux!((mu, mw), model, state)
     vortex_x, vortex_z, vortex_scratch = vortex_force!((vortex_x, vortex_z, vortex_scratch), model, vortex_scheme, (state.u, state.w), view(state.m, :, :, 1))
 
-    ## VISCOUS STRESS; u·τ and F = ∇·τ on faces
+    # Viscous stress: u·τ and F = ∇·τ on faces
     (; uτ_x, uτ_z, F_x, F_z, wτ_xz, uτ_xz) = scratch.irreversible
 
     uτ_x, uτ_z, F_x, F_z, wτ_xz, uτ_xz = viscous_stress!((uτ_x, uτ_z, F_x, F_z, wτ_xz, uτ_xz), model, state,
                                                           (∂u_x, ∂w_z, ∂u_z, ∂w_x))
 
-    ## IRREVERSIBLE FLUXES of consvar and q, with the wall conditions, and the diffusive heating on faces
+    # Irreversible fluxes of consvar and q, with the wall conditions, and the diffusive heating on faces
     (; consflux_x, consflux_z, qflux_x, qflux_z, diffusive_heating_x, diffusive_heating_z) = scratch.irreversible
 
     consflux_x, consflux_z, qflux_x, qflux_z, diffusive_heating_x, diffusive_heating_z =
         fluxes!((consflux_x, consflux_z, qflux_x, qflux_z, diffusive_heating_x, diffusive_heating_z), model, state, thermo)
 
-    ## DISSIPATIVE HEATING; ρε, σ_cons
+    # Dissipative heating: ρε, σ_cons
     (; ρε, σ_cons) = scratch.irreversible
 
     ρε, σ_cons = dissipative_heating!((ρε, σ_cons), model, thermoflux, state, (uτ_x, uτ_z, F_x, F_z), thermo,
                                       (diffusive_heating_x, diffusive_heating_z))
 
-    ## MOMENTUM
+    # Momentum
     du, dw = velocity_tendencies!((dstate.u, dstate.w), model, state, thermo, (K, vortex_x, vortex_z, F_x, F_z))
 
-    ## DENSITIES
+    # Densities
     dm = dm!(dstate.m, model, state, (mu, mw, consflux_x, consflux_z, qflux_x, qflux_z, σ_cons))
 
-    dstate = dstate_bc!(model, (m = dm, u = du, w = dw))
+    dstate = dstate_bc!((m = dm, u = du, w = dw), model)
 
     scratch = (
         thermo          = thermo,
@@ -74,11 +87,18 @@ function FC2D_tendencies!(dstate, scratch, model::FC2D, state, t)
     return dstate, scratch
 end
 
-## THERMODYNAMICS
+# the same, as the tendencies of a CFTimeSchemes model
+CFTimeSchemes.tendencies!(dstate, scratch, model::FC2D, state, t) = tendencies!(dstate, scratch, model, state, t)
 
-# Pointwise thermodynamics from m = (ρ, ρ consvar, ρ q), on the interior cells: p(v, consvar, q), T, conjvar, chempot,
-# Cp, ∂consvar/∂q, Γ = -∂μ/∂p / ∂μ/∂q (barodiffusion) and B = h - conjvar consvar - chempot q, the potential of the
-# momentum forcing. Zero-gradient halo: every difference across a wall vanishes.
+# Thermodynamics
+
+"""
+    p, consvar, q, T, conjvar, chempot, Cp, ∂consvar_∂q, Γ, B = thermodynamics!(outputs, model::FC2D, state)
+
+Pointwise thermodynamics from m = (ρ, ρ consvar, ρ q), on the interior cells: p(v, consvar, q), consvar, q, T,
+conjvar, chempot, Cp, ∂consvar/∂q, Γ = -∂μ/∂p / ∂μ/∂q (barodiffusion) and B = h - conjvar consvar - chempot q, the
+potential of the momentum forcing. Zero-gradient halo: every difference across a wall vanishes.
+"""
 function thermodynamics!((p_, consvar_, q_, T_, conjvar_, chempot_, Cp_, ∂consvar_∂q_, Γ_, B_), model::FC2D{F}, (; m)) where {F}
     (; mgr, domain, fluid) = model
 
@@ -116,9 +136,14 @@ function thermodynamics!((p_, consvar_, q_, T_, conjvar_, chempot_, Cp_, ∂cons
     return p, consvar, q, T, conjvar, chempot, Cp, ∂consvar_∂q, Γ, B
 end
 
-## KINEMATICS
+# Kinematics
 
-# cells: ∂u/∂x, ∂w/∂z and K = (ℑ(u², (1,), (Cell(),)) + ℑ(w², (2,), (Cell(),))) / 2;  vertices: ∂u/∂z, ∂w/∂x
+"""
+    ∂u_x, ∂w_z, ∂u_z, ∂w_x, K = kinematics!((∂u_x, ∂w_z, ∂u_z, ∂w_x, K), model::FC2D, state)
+
+Velocity derivatives and kinetic energy per unit mass: at the cells ∂u/∂x = δx u / Δx, ∂w/∂z = δz w / Δz and
+K = (ℑx(u²) + ℑz(w²)) / 2; at the vertices ∂u/∂z = δZ u / Δz and ∂w/∂x = δX w / Δx. Periodized.
+"""
 function kinematics!((∂u_x_, ∂w_z_, ∂u_z_, ∂w_x_, K_), model::FC2D{F}, (; u, w)) where {F}
     (; mgr, domain, inv_dx, inv_dz, spatial_scheme) = model
     (; ℑ, δ) = operators(spatial_scheme)
@@ -133,7 +158,7 @@ function kinematics!((∂u_x_, ∂w_z_, ∂u_z_, ∂w_x_, K_), model::FC2D{F}, (
         @inbounds @vec for i in irange, j in jrange
             ∂u_x[i, j] = inv_dx * δ(u, (1,), (Cell(),), i, j)
             ∂w_z[i, j] = inv_dz * δ(w, (2,), (Cell(),), i, j)
-            K[i, j]    = 0.5 * ( ℑ((u, u), (1,), (Cell(),), i, j) + ℑ((w, w), (2,), (Cell(),), i, j) )
+            K[i, j]    = ( ℑ((u, u), (1,), (Cell(),), i, j) + ℑ((w, w), (2,), (Cell(),), i, j) ) / 2
         end
     end
     # each vertex derivative over the full axis along which it is not differenced
@@ -153,9 +178,14 @@ function kinematics!((∂u_x_, ∂w_z_, ∂u_z_, ∂w_x_, K_), model::FC2D{F}, (
     return ∂u_x, ∂w_z, ∂u_z, ∂w_x, K
 end
 
-## ADVECTION
+# Advection
 
-# fluxes of the densities on faces: m u = u ℑ(m, (1,), (Face(),)), m w = w ℑ(m, (2,), (Face(),)) (third index: ρ, ρ consvar, ρ q)
+"""
+    mu, mw = advective_flux!((mu, mw), model::FC2D, state)
+
+Advective fluxes of the densities on the faces, m u = u ℑX(m) and m w = w ℑZ(m) (third index: ρ, ρ consvar, ρ q).
+Periodized.
+"""
 function advective_flux!((mu_, mw_), model::FC2D{F}, (; m, u, w)) where {F}
     (; mgr, domain, spatial_scheme) = model
     (; ℑ) = operators(spatial_scheme)
@@ -185,19 +215,27 @@ function advective_flux!((mu_, mw_), model::FC2D{F}, (; m, u, w)) where {F}
     return mu, mw
 end
 
-## VISCOUS STRESS
+# Viscous stress
 
-# Constant dynamic viscosity μ and the Stokes hypothesis: τ = 2μ (S - (∇·u) I / 3). On faces: the viscous force F = ∇·τ
-# (per unit volume) and the energy flux u·τ; ρε = ∇·(u·τ) - u·F is formed in `dissipative_heating!`.
-# The normal stresses τ_xx, τ_zz live at the cells and the shear stress τ_xz = μ (∂u/∂z + ∂w/∂x) at the vertices. The
-# energy flux pairs each stress with the velocity it multiplies before interpolating,
-#   (u·τ)_x = u ℑX(τ_xx) + ℑz(ℑX(w) τ_xz),   (u·τ)_z = w ℑZ(τ_zz) + ℑx(ℑZ(u) τ_xz),
-# so that, summing by parts, ρε is in each cell the discrete dissipation τ:∇u, a sum of squares (≥ 0):
-#   ρε = (2μ/3) (∂u_x² + ∂w_z² + (∂u_x - ∂w_z)²) + μ ℑxz((∂u_z + ∂w_x)²),
-# the first term being 2μ times the squared deviatoric normal strains ∂u_x - D/3, ∂w_z - D/3 and -D/3 (∂v/∂y = 0),
-# with D = ∇·u.
-# F is written in the rotational form F = -μ ∇×ω + (4μ/3) ∇(∇·u), identical to ∇·τ on the C-grid.
+"""
+    uτ_x, uτ_z, F_x, F_z, wτ_xz, uτ_xz = viscous_stress!(outputs, model::FC2D, state, (∂u_x, ∂w_z, ∂u_z, ∂w_x))
+
+Viscous stress for a constant dynamic viscosity μ and the Stokes hypothesis, τ = 2μ (S - (∇·u) I / 3): on the faces,
+the viscous force F = ∇·τ (per unit volume) and the energy flux u·τ; on the vertices, the shear-stress work
+ℑX(w) τ_xz and ℑZ(u) τ_xz. The dissipation ρε = ∇·(u·τ) - u·F is formed in `dissipative_heating!`.
+"""
 function viscous_stress!((uτ_x_, uτ_z_, F_x_, F_z_, wτ_xz_, uτ_xz_), model::FC2D{F}, (; u, w), (∂u_x, ∂w_z, ∂u_z, ∂w_x)) where {F}
+    #=
+    The normal stresses τ_xx, τ_zz live at the cells and the shear stress τ_xz = μ (∂u/∂z + ∂w/∂x) at the vertices.
+    The energy flux pairs each stress with the velocity it multiplies before interpolating,
+        (u·τ)_x = u ℑX(τ_xx) + ℑz(ℑX(w) τ_xz),   (u·τ)_z = w ℑZ(τ_zz) + ℑx(ℑZ(u) τ_xz),
+    so that, summing by parts, ρε is in each cell the discrete dissipation τ:∇u, a sum of squares (≥ 0):
+        ρε = (2μ/3) (∂u_x² + ∂w_z² + (∂u_x - ∂w_z)²) + μ ℑxz((∂u_z + ∂w_x)²),
+    the first term being 2μ times the squared deviatoric normal strains ∂u_x - D/3, ∂w_z - D/3 and -D/3 (∂v/∂y = 0),
+    with D = ∇·u.
+
+    F is written in the rotational form F = -μ ∇×ω + (4μ/3) ∇(∇·u), identical to ∇·τ on the C-grid.
+    =#
     (; mgr, domain, inv_dx, inv_dz, viscosity, spatial_scheme) = model
     (; dyn_visc) = viscosity
     (; ℑ, δ) = operators(spatial_scheme)
@@ -227,7 +265,7 @@ function viscous_stress!((uτ_x_, uτ_z_, F_x_, F_z_, wτ_xz_, uτ_xz_), model::
             # u·τ along x: u ℑX(τ_xx) + ℑz(ℑX(w) τ_xz), with τ_xx = 2μ (∂u/∂x - ∇·u / 3)
             uτ_x[I, j] = 2 * dyn_visc * u[I, j] * ( ℑ(∂u_x, (1,), (Face(),), I, j) - divu_x / 3 ) + ℑ(wτ_xz, (2,), (Cell(),), I, j)
             # Fₓ = μ (∂_z ω + (4/3) ∂ₓ(∇·u))
-            F_x[I, j] = dyn_visc * ( ∂ω_z + (4 / 3) * ∂divu_x )
+            F_x[I, j] = dyn_visc * ( ∂ω_z + 4 * ∂divu_x / 3 )
         end
     end
     @with mgr, let (irange, jrange) = (cells(domain, 1), faces(domain, 2))
@@ -238,7 +276,7 @@ function viscous_stress!((uτ_x_, uτ_z_, F_x_, F_z_, wτ_xz_, uτ_xz_), model::
             # u·τ along z: w ℑZ(τ_zz) + ℑx(ℑZ(u) τ_xz), with τ_zz = 2μ (∂w/∂z - ∇·u / 3)
             uτ_z[i, J] = 2 * dyn_visc * w[i, J] * ( ℑ(∂w_z, (2,), (Face(),), i, J) - divu_z / 3 ) + ℑ(uτ_xz, (1,), (Cell(),), i, J)
             # F_z = μ (-∂ₓ ω + (4/3) ∂_z(∇·u))
-            F_z[i, J] = dyn_visc * ( -∂ω_x + (4 / 3) * ∂divu_z )
+            F_z[i, J] = dyn_visc * ( -∂ω_x + 4 * ∂divu_z / 3 )
         end
     end
 
@@ -247,11 +285,16 @@ function viscous_stress!((uτ_x_, uτ_z_, F_x_, F_z_, wτ_xz_, uτ_xz_), model::
     return uτ_x, uτ_z, F_x, F_z, wτ_xz, uτ_xz
 end
 
-## IRREVERSIBLE FLUXES
+# Irreversible fluxes
 
-# On faces: qflux = -ρ k_q (∂q - Γ ∂p) and consflux (carrying the heat flux -ρ Cp k_T ∂T, or down the gradient of
-# consvar), ρ and coefficients averaged from the two cells; wall faces from `apply_tracer_bcs!`. Also the diffusive
-# heating -(consflux ∂conjvar + qflux ∂chempot), zero on wall faces (zero-gradient halo of conjvar, chempot).
+"""
+    consflux_x, consflux_z, qflux_x, qflux_z, diffusive_heating_x, diffusive_heating_z = fluxes!(outputs, model::FC2D, state, thermo)
+
+Irreversible fluxes on the faces: qflux = -ρ k_q (∂q - Γ ∂p) and consflux (carrying the heat flux -ρ Cp k_T ∂T, or
+down the gradient of consvar, see `consvar_flux`), ρ and coefficients averaged from the two cells; on wall faces,
+from `apply_tracer_bcs!`. Also the diffusive heating -(consflux ∂conjvar + qflux ∂chempot), zero on wall faces
+(zero-gradient halo of conjvar, chempot). Periodized.
+"""
 function fluxes!((consflux_x_, consflux_z_, qflux_x_, qflux_z_, diffusive_heating_x_, diffusive_heating_z_), model::FC2D{F}, (; m), thermo) where {F}
     (; mgr, domain, thermoflux, inv_dx, inv_dz, spatial_scheme) = model
     (; p, consvar, q, conjvar, chempot, T, Cp, ∂consvar_∂q, Γ) = thermo
@@ -291,21 +334,38 @@ function fluxes!((consflux_x_, consflux_z_, qflux_x_, qflux_z_, diffusive_heatin
     return consflux_x, consflux_z, qflux_x, qflux_z, diffusive_heating_x, diffusive_heating_z
 end
 
-# composition flux -ρ k_q (∂q - Γ ∂p), with barodiffusion in the consistent scheme only
+"""
+    flux = salt_flux(scheme, ρ, Γ, ∂q, ∂p)
+
+Diffusive flux of composition -ρ k_q (∂q - Γ ∂p), with barodiffusion in the consistent scheme only.
+"""
 @inline salt_flux(hf::ThermoFluxConsistent, ρ, Γ, ∂q, ∂p) = - ρ * hf.k_q * (∂q - Γ * ∂p)
 @inline salt_flux(hf::ThermoFluxDowngradient, ρ, Γ, ∂q, ∂p) = - ρ * hf.k_q * ∂q
-# consvar flux carrying the heat flux JT: JT / conjvar (+ ∂consvar/∂q qflux in the consistent scheme)
+"""
+    flux = heat_to_consvar(scheme, JT, qflux, conj, ∂consvar_∂q)
+
+Flux of consvar carrying the heat flux JT [W m⁻²]: JT / conjvar, plus ∂consvar/∂q qflux in the consistent scheme.
+"""
 @inline heat_to_consvar(::ThermoFluxConsistent, JT, qflux, conj, ∂consvar_∂q) = JT / conj + ∂consvar_∂q * qflux
 @inline heat_to_consvar(::ThermoFluxDowngradient, JT, qflux, conj, ∂consvar_∂q) = JT / conj
-# consvar flux: carrying -ρ Cp k_T ∂T (consistent), or -ρ k_T ∂consvar (downgradient)
+"""
+    flux = consvar_flux(scheme, ρ, Cp, ∂T, ∂cons, qflux, conj, ∂consvar_∂q)
+
+Diffusive flux of consvar: carrying the heat flux -ρ Cp k_T ∂T (`ThermoFluxConsistent`, see `heat_to_consvar`), or
+down the gradient of consvar, -ρ k_T ∂consvar (`ThermoFluxDowngradient`).
+"""
 @inline consvar_flux(hf::ThermoFluxConsistent, ρ, Cp, ∂T, ∂cons, qflux, conj, ∂consvar_∂q) =
     heat_to_consvar(hf, - ρ * Cp * hf.k_T * ∂T, qflux, conj, ∂consvar_∂q)
 @inline consvar_flux(hf::ThermoFluxDowngradient, ρ, Cp, ∂T, ∂cons, qflux, conj, ∂consvar_∂q) = - ρ * hf.k_T * ∂cons
 
-## TRACER BOUNDARY CONDITIONS
+# Tracer boundary conditions
 
-# On wall faces, the fluxes of consvar and q are set by the wall conditions, replacing those computed by `fluxes!`.
-# Plain loops: about 2(Mx + Mz) faces, too few for vectorisation or threads to pay off.
+"""
+    apply_tracer_bcs!((consflux_x, qflux_x, consflux_z, qflux_z), model::FC2D, …)
+
+Set the fluxes of consvar and q on the wall faces from the wall conditions, replacing those computed by `fluxes!`:
+along each dimension with walls, then on each wall, then at each position along it.
+"""
 function apply_tracer_bcs!((consflux_x, qflux_x, consflux_z, qflux_z), model::FC2D, ρ, thermo)
     (; boundary) = model
     left_right, bottom_top = boundary.walls
@@ -321,6 +381,7 @@ function apply_tracer_bcs!(fluxes, (lower, upper)::Tuple{Wall, Wall}, D, model, 
     apply_tracer_bcs!(fluxes, upper.tracers, hi, D, model, ρ, thermo)
 end
 function apply_tracer_bcs!((consflux, qflux), (cons_bc, q_bc), side, D, model::FC2D, ρ, thermo)
+    # plain loops: about 2(Mx + Mz) faces, too few for vectorization or threads to pay off
     for I in slice(qflux, D)                                               # each position along the wall
         i_face, i_cell = across(I, D, side.face), across(I, D, side.cell)
         wall = wall_state(model, D, side, i_cell, ρ, thermo)              # (; n, d, ρ, p, ∂p) on the wall face
@@ -331,8 +392,13 @@ function apply_tracer_bcs!((consflux, qflux), (cons_bc, q_bc), side, D, model::F
     end
 end
 
-# wall face state: inward normal n, distance d to the cell centre, density ρ of the cell, pressure p extrapolated
-# hydrostatically to the wall and the normal pressure gradient ∂p = -ρ g_D (g_D: gravity along D)
+"""
+    wall = wall_state(model::FC2D, D, side, i_cell, ρ, thermo)
+
+State on a wall face normal to dimension `D`: `(; n, d, ρ, p, ∂p)`, the inward normal n, the distance d to the cell
+center, the density ρ of the cell, the pressure p extrapolated hydrostatically to the wall, and the normal pressure
+gradient ∂p = -ρ g_D (g_D: gravity along D).
+"""
 @inline function wall_state(model::FC2D, ::Val{d}, side, i_cell, ρ, (; p)) where d
     (; dx, dz, space) = model
     (; g) = space
@@ -341,17 +407,27 @@ end
     return (; n = side.n, d = Δ / 2, ρ = ρc, p = p[i_cell] + side.n * ρc * g_D * Δ / 2, ∂p = - ρc * g_D)
 end
 
-# composition: prescribed flux F of ρq, or the face flux with the wall value q_w at distance d
+"""
+    flux = q_flux_bc(bc, value, thermo, i_cell, wall, model)
+
+Flux of composition on a wall face: the prescribed flux `F` of ρq (`Flux`), or the face flux with the wall value
+`q_w` at distance d from the cell center (`Value`).
+"""
 @inline q_flux_bc(::Flux, F, thermo, i_cell, wall, model) = wall.n * F
 @inline function q_flux_bc(::Value, q_w, (; q, Γ), i_cell, wall, model)
     (; thermoflux) = model
     return salt_flux(thermoflux, wall.ρ, Γ[i_cell], wall.n * (q[i_cell] - q_w) / wall.d, wall.∂p)
 end
-# consvar: prescribed flux F of ρ consvar, prescribed heat flux F, or the face flux with the wall value cons_w at
-# distance d and T_wall = T(p_wall, cons_w, q_cell). The wall delivers exactly the heat flux (HeatFlux, or Value with
-# the consistent scheme): the production between the wall and the cell centre is inside consflux.
-@inline cons_flux_bc(::Flux{V, :density}, F, thermo, i_cell, wall, model, qflux) where V = wall.n * F
-@inline function cons_flux_bc(::Flux{V, :heat}, F, (; conjvar, ∂consvar_∂q), i_cell, wall, model, qflux) where V
+"""
+    flux = cons_flux_bc(bc, value, thermo, i_cell, wall, model, qflux)
+
+Flux of consvar on a wall face: the prescribed flux `F` of ρ consvar (`Flux`), the prescribed heat flux `F`
+(`HeatFlux`), or the face flux with the wall value `cons_w` at distance d and T_wall = T(p_wall, cons_w, q_cell)
+(`Value`). The wall delivers exactly the heat flux (`HeatFlux`, or `Value` with the consistent scheme): the production
+between the wall and the cell center is inside consflux.
+"""
+@inline cons_flux_bc(::Flux{<:Any, :density}, F, thermo, i_cell, wall, model, qflux) = wall.n * F
+@inline function cons_flux_bc(::Flux{<:Any, :heat}, F, (; conjvar, ∂consvar_∂q), i_cell, wall, model, qflux)
     (; thermoflux) = model
     return heat_to_consvar(thermoflux, wall.n * F, qflux, conjvar[i_cell], ∂consvar_∂q[i_cell])
 end
@@ -362,11 +438,17 @@ end
                         qflux, conjvar[i_cell], ∂consvar_∂q[i_cell])
 end
 
-## DISSIPATIVE HEATING
+# Dissipative heating
 
-# At interior cells: viscous heating ρε = ∇·(u·τ) - u·F, and the production of consvar
-# σ = (ρε + avg(diffusive heating)) / conjvar. Wall faces carry no diffusive heating (zero-gradient halo): the
-# energy a wall delivers is conjvar_cell consflux + chempot_cell qflux, see `cons_flux_bc`.
+"""
+    ρε, σ_cons = dissipative_heating!((ρε, σ_cons), model::FC2D, thermoflux_scheme, state, (uτ_x, uτ_z, F_x, F_z), thermo,
+                                      (diffusive_heating_x, diffusive_heating_z))
+
+At the interior cells: the viscous heating ρε = ∇·(u·τ) - u·F [W m⁻³], and the production of consvar
+σ = (ρε + ℑ(diffusive heating)) / conjvar with `ThermoFluxConsistent`, or σ = 0 with `ThermoFluxDowngradient`.
+Zero-gradient halo. Wall faces carry no diffusive heating (zero-gradient halo of conjvar, chempot): the energy a
+wall delivers is conjvar_cell consflux + chempot_cell qflux, see `cons_flux_bc`.
+"""
 function dissipative_heating!((ρε_, σ_cons_), model::FC2D{F}, ::ThermoFluxConsistent, (; u, w), (uτ_x, uτ_z, F_x, F_z), (; conjvar),
                               (diffusive_heating_x, diffusive_heating_z)) where {F}
     (; mgr, domain, inv_dx, inv_dz, spatial_scheme) = model
@@ -406,10 +488,14 @@ function dissipative_heating!((ρε_, σ_cons_), model::FC2D{F}, ::ThermoFluxDow
     return ρε, σ_cons
 end
 
-## MOMENTUM
+# Momentum
 
-# Velocity tendencies on faces: -consvar ∇conjvar - q ∇chempot - ∇B - g ẑ - ∇K - ω×u + F/ρ, with face values
-# ρ = avg(m₁) and consvar, q = avg(m₂), avg(m₃) / ρ
+"""
+    du, dw = velocity_tendencies!((du, dw), model::FC2D, state, thermo, (K, vortex_x, vortex_z, F_x, F_z))
+
+Velocity tendencies on the faces, -consvar ∇conjvar - q ∇chempot - ∇B - g ẑ - ∇K - ω×u + F/ρ, with the face values
+ρ = ℑ(m₁) and consvar, q = ℑ(m₂)/ρ, ℑ(m₃)/ρ.
+"""
 function velocity_tendencies!((du_, dw_), model::FC2D{F}, (; m), (; conjvar, chempot, B), (K, vortex_x, vortex_z, F_x, F_z)) where {F}
     (; mgr, domain, space, inv_dx, inv_dz, spatial_scheme) = model
     (; g) = space
@@ -437,9 +523,14 @@ function velocity_tendencies!((du_, dw_), model::FC2D{F}, (; m), (; conjvar, che
     return du, dw
 end
 
-## DENSITIES
+# Densities
 
-# at interior cells: dm = -∇·(m u) - ∇·(0, consflux, qflux) + (0, σ_cons, 0)
+"""
+    dm = dm!(dm, model::FC2D, state, (mu, mw, consflux_x, consflux_z, qflux_x, qflux_z, σ_cons))
+
+Tendencies of the densities at the interior cells, dm = -∇·(m u) - ∇·(0, consflux, qflux) + (0, σ_cons, 0), in flux
+form: δx/Δx and δz/Δz of the face fluxes.
+"""
 function dm!(dm_, model::FC2D{F}, (; m), (mu, mw, consflux_x, consflux_z, qflux_x, qflux_z, σ_cons)) where {F}
     (; mgr, domain, inv_dx, inv_dz, spatial_scheme) = model
     (; δ) = operators(spatial_scheme)
@@ -460,10 +551,14 @@ function dm!(dm_, model::FC2D{F}, (; m), (mu, mw, consflux_x, consflux_z, qflux_
     return dm
 end
 
-## BOUNDARY CONDITIONS
+# Boundary conditions: the halo of the state and of its tendencies
 
-# tendencies vanish in the halo, and for the normal velocity on walls
-function dstate_bc!(model::FC2D, (; m, u, w))
+"""
+    dstate = dstate_bc!(dstate, model::FC2D)
+
+Set the tendencies `dstate = (; m, u, w)` to zero in the halo, and the tendency of the normal velocity on the walls.
+"""
+function dstate_bc!((; m, u, w), model::FC2D)
     (; domain) = model
     zero_halo!(domain, m, (Cell(), Cell()))
     zero_halo!(domain, u, (Face(), Cell()))
@@ -471,9 +566,14 @@ function dstate_bc!(model::FC2D, (; m, u, w))
     return (; m, u, w)
 end
 
-# State halo (never the interior): ghost velocities realise the wall conditions; m has a zero-gradient halo, so that
-# the equation of state only sees valid states. Tracer fluxes through walls come from `apply_tracer_bcs!`.
-function state_bc!(model::FC2D, (; m, u, w))
+"""
+    state = state_bc!(state, model::FC2D)
+
+Fill the halo of `state = (; m, u, w)`, never its interior: the ghost velocities realize the wall conditions (see
+`fill_velocity_halo!`), and m gets a zero-gradient halo, so that the equation of state only sees valid states. The
+tracer fluxes through walls are set by `apply_tracer_bcs!`, not through the halo.
+"""
+function state_bc!((; m, u, w), model::FC2D)
     (; domain, boundary, dx, dz, viscosity) = model
     fill_velocity_halo!(boundary, domain, (u, w), (dx, dz), viscosity.dyn_visc)
     fill_halo!(domain, m, ZeroGradient())

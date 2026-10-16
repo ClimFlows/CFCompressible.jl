@@ -1,3 +1,8 @@
+"""
+    Loops
+
+Time integration of FC2D: the main loop (`loop`), its Runge-Kutta stage updates and its CFL condition.
+"""
 module Loops
 
 import CFTimeSchemes: CFTimeSchemes, IVPSolver, advance!, scratch_space, max_time_step
@@ -8,10 +13,15 @@ using ManagedLoops: @vec, @with
 
 export loop
 
-function loop(model::FC2D{F}, state, time_scheme, params; outputs = nothing) where {F}
+"""
+    state = loop(state, model::FC2D, time_scheme, params; outputs = nothing)
+
+Main time integration loop of FC2D, see `CFCompressible.loop`.
+"""
+function loop(state, model::FC2D{F}, time_scheme, params; outputs = nothing) where {F}
     (; Nslice, slice_size, dt_max, cfl) = params
 
-    # initialise time
+    # initialize time
     t = zero(F)
 
     # create dstate and scratch space
@@ -49,20 +59,33 @@ function loop(model::FC2D{F}, state, time_scheme, params; outputs = nothing) whe
     return state
 end
 
-# call the outputs, if any, with the tendencies and scratch at time t, and close them
+"""
+    record_outputs(outputs, model, state, dstate, scratch, book, t)
+
+Call `outputs`, if any, with the tendencies and scratch of `state` at time `t` (recomputed into `dstate`, `scratch`).
+"""
 function record_outputs(outputs, model, state, dstate, scratch, book, t)
     dstate, scratch = tendencies!(dstate, scratch, model, state, t)
     return outputs(model, state, dstate, scratch, book, t)
 end
 record_outputs(::Nothing, args...) = nothing
+"""
+    close_outputs(outputs)
+
+Close `outputs`, if any, at the end of the run.
+"""
 close_outputs(outputs) = close(outputs)
 close_outputs(::Nothing) = nothing
 
-## TIME STEPPING
+# Time stepping
 
-# Runge-Kutta stage update new = old + Σₙ factorₙ incrementₙ (one to four increments) of every state array, halo
-# included, run by the model's manager: the default update of CFTimeSchemes broadcasts on a single thread. A `void`
-# `new` (non-mutating solver) keeps that default.
+"""
+    new = CFTimeSchemes.update!(new, model::FC2D, old, a, ka[, b, kb[, c, kc[, d, kd]]])
+
+Runge-Kutta stage update new = old + Σₙ factorₙ incrementₙ (one to four increments) of every state array, halo
+included, run by the model's manager (see `update_state!`). A `void` `new` (non-mutating solver) keeps the default
+of CFTimeSchemes.
+"""
 CFTimeSchemes.update!(new::NamedTuple, model::FC2D, old, a, ka) =
     update_state!(new, model, old, (a,), (ka,))
 CFTimeSchemes.update!(new::NamedTuple, model::FC2D, old, a, ka, b, kb) =
@@ -72,8 +95,14 @@ CFTimeSchemes.update!(new::NamedTuple, model::FC2D, old, a, ka, b, kb, c, kc) =
 CFTimeSchemes.update!(new::NamedTuple, model::FC2D, old, a, ka, b, kb, c, kc, d, kd) =
     update_state!(new, model, old, (a, b, c, d), (ka, kb, kc, kd))
 
-# one density of m at a time, so that the threads share out the levels j rather than the densities
+"""
+    new = update_state!(new, model::FC2D, old, factors, increments)
+
+new = old + Σₙ factorₙ incrementₙ for each array of the state, with the threads of the model's manager: the default
+update of CFTimeSchemes broadcasts on a single thread.
+"""
 function update_state!(new, (; mgr)::FC2D, old, factors, increments)
+    # one density of m at a time, so that the threads share out the levels j rather than the densities
     for n in axes(new.m, 3)
         update_array!(view(new.m, :, :, n), mgr, view(old.m, :, :, n), factors, map(k -> view(k.m, :, :, n), increments))
     end
@@ -82,7 +111,11 @@ function update_state!(new, (; mgr)::FC2D, old, factors, increments)
     return new
 end
 
-# x = u + Σₙ factorₙ kₙ at every point of the 2D arrays
+"""
+    x = update_array!(x, mgr, u, factors, ks)
+
+x = u + Σₙ factorₙ kₙ at every point of the 2D arrays, by the manager `mgr`.
+"""
 function update_array!(x, mgr, u, factors, ks)
     @with mgr, let (irange, jrange) = axes(x)
         @inbounds @vec for i in irange, j in jrange
@@ -92,7 +125,11 @@ function update_array!(x, mgr, u, factors, ks)
     return x
 end
 
-# Σₙ factorₙ kₙ[i, j], accumulated in the order of n by multiply-adds
+"""
+    increment(factors, ks, i, j)
+
+Σₙ factorₙ kₙ[i, j], accumulated in the order of n by multiply-adds.
+"""
 Base.@propagate_inbounds increment((a,)::Tuple{Any}, (ka,)::Tuple{Any}, i, j) = a * ka[i, j]
 Base.@propagate_inbounds increment(factors::Tuple, ks::Tuple, i, j) =
     muladd(last(factors), last(ks)[i, j], increment(Base.front(factors), Base.front(ks), i, j))
@@ -115,7 +152,7 @@ end
     ω = max_frequency(model::FC2D, state)
 
 Return an upper bound `ω` [s⁻¹] on the fastest discrete frequency of the state over the interior, the sum of:
-- advection, centred on the C-grid: max|u|/dx + max|w|/dz;
+- advection, centered on the C-grid: max|u|/dx + max|w|/dz;
 - sound, on the C-grid (ω² = c² (4/dx² sin²(k dx/2) + 4/dz² sin²(m dz/2))): 2 max(c) √(1/dx² + 1/dz²);
 - diffusion: 4 max(ν, k_T, k_q) (1/dx² + 1/dz²), with ν = (4μ/3) / min(ρ), the compressive modes being damped
   by (4μ/3) ∇(∇·u);
@@ -127,21 +164,25 @@ function max_frequency(model::FC2D{F}, state) where {F}
     irange, jrange = interior_cells(domain, 1), interior_cells(domain, 2)
     inv_d2         = inv(dx^2) + inv(dz^2)
     advection      = maximum(abs, view(u, irange, jrange)) / dx + maximum(abs, view(w, irange, jrange)) / dz
-    sound          = 2 * max_sound_speed(state, model) * sqrt(inv_d2)
-    ν              = (4 / 3) * viscosity.dyn_visc / minimum(view(m, irange, jrange, 1))
+    sound          = 2 * max_sound_speed(model, state) * sqrt(inv_d2)
+    ν              = 4 * viscosity.dyn_visc / (3 * minimum(view(m, irange, jrange, 1)))
     diffusion      = 4 * max(ν, thermoflux.k_T, thermoflux.k_q) * inv_d2
     return advection + sound + diffusion + max_buoyancy_frequency(model, m) + floatmin(F)
 end
 
-# max(N) over the w-faces J between interior cells J-1 and J, N² = g (α ∂consvar/∂z - β ∂q/∂z), with
-# α = ∂v/∂consvar / v and β = -∂v/∂q / v at the face (mean pressure, consvar and q of the two cells);
-# N² < 0 (static instability) does not oscillate and gives 0. N² is computed on the faces by the model's manager, then
-# reduced on one thread; the walls and the halo stay at zero.
+"""
+    N = max_buoyancy_frequency(model::FC2D, m)
+
+max(N) [s⁻¹] over the w-faces J between interior cells J-1 and J, N² = g (α ∂consvar/∂z - β ∂q/∂z), with
+α = ∂v/∂consvar / v and β = -∂v/∂q / v at the face (mean pressure, consvar and q of the two cells);
+N² < 0 (static instability) does not oscillate and gives 0.
+"""
 function max_buoyancy_frequency(model::FC2D{F}, m) where {F}
     (; mgr, fluid, domain, space, dz) = model
     (; g) = space
     pressure, volume_functions = fluid(:v, :consvar, :q).pressure, fluid(:p, :consvar, :q).volume_functions
 
+    # N² is computed on the faces by the model's manager, then reduced on one thread; the walls and the halo stay at zero
     N2 = alloc(F, mgr, domain, (Cell(), Face()))
 
     @with mgr, let (irange, jrange) = (interior_cells(domain, 1), interior_cells(domain, 2)[2:end])
@@ -157,8 +198,13 @@ function max_buoyancy_frequency(model::FC2D{F}, m) where {F}
     return sqrt(maximum(N2))
 end
 
-# maximum sound speed over the interior, from c² computed on the cells by the model's manager (zero in the halo)
-function max_sound_speed((; m), model::FC2D{F}) where {F}
+"""
+    c = max_sound_speed(model::FC2D, state)
+
+Maximum sound speed c [m s⁻¹] over the interior, from c² computed on the cells by the model's manager (zero in the
+halo).
+"""
+function max_sound_speed(model::FC2D{F}, (; m)) where {F}
     (; mgr, fluid, domain) = model
     sound_speed2 = fluid(:v, :consvar, :q).sound_speed2
 
@@ -173,11 +219,16 @@ function max_sound_speed((; m), model::FC2D{F}) where {F}
     return sqrt(maximum(c2))
 end
 
-# simple progress meter
+"""
+    progress(t_iter, slice_size, total_time)
+
+Display progress of the simulation in the terminal.
+"""
 function progress(t_iter, slice_size, total_time)
     seconds = round(t_iter*slice_size; digits=2)
     print("\rProgress: $seconds / $total_time s", " " ^ 10)
-    flush(stdout)       
+    flush(stdout)
+    return nothing
 end
 
 end # module Loops

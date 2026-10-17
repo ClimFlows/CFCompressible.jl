@@ -7,6 +7,7 @@ or via runtests.jl / TraceableEnergetics/test/runtests.jl
 using Test
 
 using CFCompressible
+using CFCompressible: CFTimeSchemes
 using LoopManagers: MultiThread, VectorizedCPU
 using CFBoxes, CFDiffusionSchemes, ClimFluids, ForwardDiff
 using CFPlanets: Tank2D
@@ -126,6 +127,12 @@ const forced_box = (;
         r = test_energy(fc_tend!, fc_cell_energies, model, active)
         @info "FC2D relative dE/dt residual" r
         test_no_allocations(fc_tend!, model, active)
+    end
+
+    # a short run of the time loop, 3 steps per slice
+    @testset "loop" begin
+        test_loop(CFCompressible.loop, CFTimeSchemes.RungeKutta4(model), model, active, (; mass = 1, q = 3),
+                  (; Nslice = 2, slice_size = 2.5e-3, dt_max = 1.0, cfl = 0.9))
     end
 
     # every kind of wall condition: the wall fluxes and the work of the wall stresses enter the budgets exactly

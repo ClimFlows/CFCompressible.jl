@@ -1,10 +1,17 @@
 [deps]
+CFBoxes = "435ea534-530f-4103-a4e2-07b06daf33cf"
+CFDiffusionSchemes = "c98386de-3084-4a91-9df5-5a8c5033d229"
 CFDomains = "3699aaca-035b-4155-96ec-eecb526248de"
+CFPlanets = "9c2ca15e-caec-41c0-a22c-2e93fe5a241f"
 ClimFlowsTestCases = "55a4ed1b-ebae-44a5-bd1f-98d158431b8a"
 ClimFluids = "68475963-a72f-47d4-b871-9c5545ecd1c0"
 Enzyme = "7da242da-08ed-463a-9acd-ee780be4f1d9"
+ForwardDiff = "f6369f11-7733-5829-9624-2563aa707210"
+LoopManagers = "d33d4f76-8fbe-47a6-acd9-ead534c583ff"
+MutatingOrNot = "6a37069a-9a67-4b2d-a34a-f09ab4b23c7c"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 
 [compat]
+ClimFluids = "0.1.6"
 Enzyme = "0.13.66"
 julia = "1.10"

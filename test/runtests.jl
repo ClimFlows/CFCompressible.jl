@@ -57,3 +57,8 @@ newton = NewtonSolve(; params...)
 @testset "1D Hamiltonian structure" begin
     test(H, state)
 end
+
+# 2D box model (FC2D); own module so its definitions do not clash with the tests above
+module Box2DTests
+include("box2d.jl")
+end

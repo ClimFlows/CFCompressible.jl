@@ -4,12 +4,11 @@ CFAnelastics/test/helpers.jl and CFCompressible/test/box_helpers.jl)
 =#
 
 #=
-Fresh scratch arrays come from `CFBoxes.alloc!(void, …)` (or `MutatingOrNot.similar!(void, …)`). In the tests they
-are filled with `ALLOC_FILL[]`, so that we can check that results never depend on the contents of new allocations.
-These two methods are deliberate type piracy, confined to the tests.
+Fresh scratch arrays come from `CFBoxes.alloc!(void, …)`. In the tests they are filled with `ALLOC_FILL[]`, so that
+we can check that results never depend on the contents of new allocations. This method is deliberate type piracy,
+confined to the tests.
 =#
 const ALLOC_FILL = Ref(0.0)
-MutatingOrNot.similar!(::MutatingOrNot.Void, y...) = fill!(similar(y...), ALLOC_FILL[])
 CFBoxes.alloc!(::MutatingOrNot.Void, F::Type, mgr, box::CFBoxes.AbstractBox, location::Tuple, dims...) =
     fill!(CFBoxes.alloc(F, mgr, box, location, dims...), ALLOC_FILL[])
 

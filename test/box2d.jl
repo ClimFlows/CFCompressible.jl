@@ -30,8 +30,6 @@ const fluid = NonlinearBinaryFluid(:potential_temperature, fluid_params)
 
 const thermoflux = ThermoFluxConsistent(k_T = 1e-4, k_q = 1e-5)
 
-test_box(Mx = 32, Mz = 16; boundary = (Periodic, Bounded)) = Box2D(; Mx, Mz, Hx = 1, Hz = 1, boundary)
-
 # closed (impermeable, insulating, no salt flux) walls
 closed_wall(tangential = FreeSlip()) = Wall(; tangential, tracers = (Flux(0.0), Flux(0.0)))   # (consvar, q)
 
@@ -48,7 +46,7 @@ q_active(x, z) = q_rest(z) + 0.001 * cos(2π * x / Lx + 0.5) * cos(π * z / Lz)
 energy-conserving schemes
 =#
 function fc_model(; mgr = mgr, boundary = (Periodic, Bounded), walls = (; bottom = closed_wall(), top = closed_wall()))
-    domain = test_box(32, 16; boundary)
+    domain = Box2D(; Mx = 32, Mz = 16, boundary)
     boundary_conditions = BoxBoundaryConditions(domain; walls...)
     return FC2D((; mgr, domain, space, fluid, spatial_scheme = Centred2(), vortex_scheme = VortexEnergyCons(),
         thermoflux_scheme = thermoflux, viscosity_scheme = ViscosityScheme(dyn_visc = 1e-3), boundary_conditions))
@@ -66,29 +64,13 @@ function fc_state(model)
     # near-hydrostatic: ρ ≈ ρ0 (1 + g (Lz - z) / c²) with c² = v0 / α_p, plus a small perturbation
     c² = fluid.v0 / fluid.α_p
     ρ(x, z) = ρ0 * (1 + g * (Lz - z) / c² + 1e-4 * sin(2π * x / Lx + 0.7) * cos(π * z / Lz))
-    θ, q = θ_active, q_active
     x(i) = cellpoint(domain, dx, 1, i); z(j) = cellpoint(domain, dz, 2, j)
     X(I) = facepoint(domain, dx, 1, I); Z(J) = facepoint(domain, dz, 2, J)
-
-    m = alloc(Float64, nothing, domain, (Cell(), Cell()), 3)
-    u = alloc(Float64, nothing, domain, (Face(), Cell()))
-    w = alloc(Float64, nothing, domain, (Cell(), Face()))
-    for i in axes(m, 1), j in axes(m, 2)
-        r = ρ(x(i), z(j))
-        m[i, j, 1] = r
-        m[i, j, 2] = r * θ(x(i), z(j))
-        m[i, j, 3] = r * q(x(i), z(j))
-    end
-    for I in axes(u, 1), j in axes(u, 2)
-        u[I, j] = U * (cos(π * z(j) / Lz) + 0.3 * sin(2π * X(I) / Lx) * sin(π * z(j) / Lz))
-    end
-    for i in axes(w, 1), J in axes(w, 2)
-        w[i, J] = 0.5U * sin(π * Z(J) / Lz) * cos(2π * x(i) / Lx + 0.2)
-    end
-    # impermeable walls
-    boundary_topology(domain)[2] isa Bounded && (w[:, interior_xZ(domain)[2][[1, end]]] .= 0)
-    boundary_topology(domain)[1] isa Bounded && (u[interior_Xz(domain)[1][[1, end]], :] .= 0)
-    return (; m, u, w)
+    nx, nz, nX, nZ = ncells(domain, 1), ncells(domain, 2), nfaces(domain, 1), nfaces(domain, 2)
+    density = [ρ(x(i), z(j)) for i in 1:nx, j in 1:nz]
+    u = [U * (cos(π * z(j) / Lz) + 0.3 * sin(2π * X(I) / Lx) * sin(π * z(j) / Lz)) for I in 1:nX, j in 1:nz]
+    w = [0.5U * sin(π * Z(J) / Lz) * cos(2π * x(i) / Lx + 0.2) for i in 1:nx, J in 1:nZ]
+    return CFCompressible.initialize(model; density, consvar = θ_active, q = q_active, velocity = (u, w))   # also zeroes the wall faces
 end
 
 # per-cell energy ΔxΔz ρ (K + e(v, θ, q) + Φ), with e = h - p v and K = (ℑ(u², (1,), (Cell(),)) + ℑ(w², (2,), (Cell(),))) / 2

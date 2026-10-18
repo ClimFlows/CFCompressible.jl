@@ -144,14 +144,6 @@ Main time integration loop for the FC2D model; advances `state` in place and ret
 """
 loop(state, model::FC2D, time_scheme, params; kwargs...) = Loops.loop(state, model, time_scheme, params; kwargs...)
 
-# pointwise energies of FC2D
-"""
-    ke, pe, te = energies!((ke, pe, te), model::FC2D, state)
-
-Kinetic, potential + internal, and total energy per unit volume at cell centers; see `BoxEnergetics.energies!`.
-"""
-energies!(energies, model::FC2D, state) = BoxEnergetics.energies!(energies, model, state)
-
 # specify diagnostics for each model
 diagnostics(::FCE) = Diagnostics.diagnostics_FCE()
 # the FC2D methods of these are in `diagnostics.jl`
@@ -172,7 +164,6 @@ include("julia/diagnostics.jl")
 
 include("julia/box_dynamics.jl")
 include("julia/box_initialize.jl")
-include("julia/box_energetics.jl")
 include("julia/loops.jl")
 
 end # module CFCompressible

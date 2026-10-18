@@ -5,6 +5,7 @@ DocMeta.setdocmeta!(CFCompressible, :DocTestSetup, :(using CFCompressible); recu
 
 makedocs(;
     modules=[CFCompressible],
+    checkdocs=:exports,
     authors="Thomas Dubos <thomas.dubos@polytechnique.edu> and contributors",
     sitename="CFCompressible.jl",
     format=Documenter.HTML(;

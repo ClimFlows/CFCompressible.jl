@@ -291,7 +291,7 @@ end
     consflux_x, consflux_z, qflux_x, qflux_z, diffusive_heating_x, diffusive_heating_z = fluxes!(outputs, model::FC2D, state, thermo)
 
 Irreversible fluxes on the faces: qflux = -ρ k_q (∂q - Γ ∂p) and consflux (carrying the heat flux -ρ Cp k_T ∂T, or
-down the gradient of consvar, see `consvar_flux`), ρ and coefficients averaged from the two cells; on wall faces,
+down the gradient of consvar, see `CFDiffusionSchemes.consvar_flux`), ρ and coefficients averaged from the two cells; on wall faces,
 from `apply_tracer_bcs!`. Also the diffusive heating -(consflux ∂conjvar + qflux ∂chempot), zero on wall faces
 (zero-gradient halo of conjvar, chempot). Periodized.
 """
@@ -333,30 +333,6 @@ function fluxes!((consflux_x_, consflux_z_, qflux_x_, qflux_z_, diffusive_heatin
 
     return consflux_x, consflux_z, qflux_x, qflux_z, diffusive_heating_x, diffusive_heating_z
 end
-
-"""
-    flux = salt_flux(scheme, ρ, Γ, ∂q, ∂p)
-
-Diffusive flux of composition -ρ k_q (∂q - Γ ∂p), with barodiffusion in the consistent scheme only.
-"""
-@inline salt_flux(hf::ThermoFluxConsistent, ρ, Γ, ∂q, ∂p) = - ρ * hf.k_q * (∂q - Γ * ∂p)
-@inline salt_flux(hf::ThermoFluxDowngradient, ρ, Γ, ∂q, ∂p) = - ρ * hf.k_q * ∂q
-"""
-    flux = heat_to_consvar(scheme, JT, qflux, conj, ∂consvar_∂q)
-
-Flux of consvar carrying the heat flux JT [W m⁻²]: JT / conjvar, plus ∂consvar/∂q qflux in the consistent scheme.
-"""
-@inline heat_to_consvar(::ThermoFluxConsistent, JT, qflux, conj, ∂consvar_∂q) = JT / conj + ∂consvar_∂q * qflux
-@inline heat_to_consvar(::ThermoFluxDowngradient, JT, qflux, conj, ∂consvar_∂q) = JT / conj
-"""
-    flux = consvar_flux(scheme, ρ, Cp, ∂T, ∂cons, qflux, conj, ∂consvar_∂q)
-
-Diffusive flux of consvar: carrying the heat flux -ρ Cp k_T ∂T (`ThermoFluxConsistent`, see `heat_to_consvar`), or
-down the gradient of consvar, -ρ k_T ∂consvar (`ThermoFluxDowngradient`).
-"""
-@inline consvar_flux(hf::ThermoFluxConsistent, ρ, Cp, ∂T, ∂cons, qflux, conj, ∂consvar_∂q) =
-    heat_to_consvar(hf, - ρ * Cp * hf.k_T * ∂T, qflux, conj, ∂consvar_∂q)
-@inline consvar_flux(hf::ThermoFluxDowngradient, ρ, Cp, ∂T, ∂cons, qflux, conj, ∂consvar_∂q) = - ρ * hf.k_T * ∂cons
 
 # Tracer boundary conditions
 

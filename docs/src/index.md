@@ -14,3 +14,9 @@ Documentation for [CFCompressible](https://github.com/dubosipsl/CFCompressible.j
 ```@autodocs
 Modules = [CFCompressible, CFCompressible.NH_state]
 ```
+
+## Box model (FC2D)
+
+```@autodocs
+Modules = [CFCompressible.BoxDynamics, CFCompressible.BoxInitialize, CFCompressible.Loops, CFCompressible.Diagnostics]
+```

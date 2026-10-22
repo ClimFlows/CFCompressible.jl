@@ -129,3 +129,21 @@ const forced_box = (;
         @test wall_input(box, scratch, 2, 1).heat ≈ 40.0 * Lx rtol = 1e-12     # bottom HeatFlux delivers exactly ∫F dx
     end
 end
+
+# the balanced density has the pressure `pref` at the height z0 where the geopotential vanishes, inside or outside the box:
+# the pressure of the piecewise-linear interpolant of the cell-center pressures (linear extrapolation outside)
+@testset "FC2D balanced density anchored at z0" begin
+    for z0 in (0.0, 0.2, Lz + 0.4)
+        tank = Tank2D(Lx = Lx, Lz = Lz, g = g, z0 = z0)
+        base = fc_model(boundary = (Periodic, Bounded))
+        model = typeof(base)(map(f -> f === :space ? tank : getfield(base, f), fieldnames(typeof(base)))...)
+        (; domain, dx, dz) = model
+        ρ = CFCompressible.balanced_density(model; consvar = θ_active, q = q_active, pref = 1e5)
+        jc, i = interior_cells(domain, 2), 5
+        z_cell(j) = cellpoint(domain, dz, 2, j)
+        p = [fluid(:v, :consvar, :q).pressure(inv(ρ[i, j]), θ_active(cellpoint(domain, dx, 1, i), z_cell(j)),
+                                              q_active(cellpoint(domain, dx, 1, i), z_cell(j))) for j in jc]
+        k = clamp(floor(Int, (z0 - z_cell(first(jc))) / dz) + 1, 1, length(jc) - 1)
+        @test p[k] + (z0 - z_cell(jc[k])) / dz * (p[k+1] - p[k]) ≈ 1e5 rtol = 1e-9
+    end
+end

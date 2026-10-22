@@ -53,7 +53,7 @@ struct FC2D{F, Manager, Domain<:Box2D, Boundary<:BoxBoundaryConditions, Fluid, S
     mgr::Manager
     "the box (grid sizes, halo widths, topology)"
     domain::Domain
-    "the physical box: lengths Lx, Lz [m] and gravity g [m s⁻²]"
+    "the physical box: lengths Lx, Lz [m], gravity g [m s⁻²] and the height z0 [m] where the geopotential g (z - z0) vanishes"
     space::Tank2D{F}
     "wall conditions, discretized on the grid"
     boundary::Boundary
@@ -117,7 +117,7 @@ function vertical_remap_FCE! end # implemented in `remap_spectral.jl`
 # specify initialization
 """
     (; m, u, w) = initialize(model::FC2D; density, consvar, q, velocity = nothing)
-    ρ = balanced_density(model::FC2D; consvar, q, ptop)
+    ρ = balanced_density(model::FC2D; consvar, q, pref)
     (u, w) = divergence_free_velocity(model::FC2D, ρ, ψ)
 
 Initial state of the FC2D model, in three steps: the rest density, a discretely divergence-free perturbation for

@@ -44,13 +44,15 @@ initial_velocity(F, (u, w)::Tuple, mgr, domain) =
 initial_velocity(F, ::Nothing, mgr, domain) = (alloc(F, mgr, domain, (Face(), Cell())), alloc(F, mgr, domain, (Cell(), Face())))
 
 """
-    ρ = balanced_density(model::FC2D; consvar, q, ptop)
+    ρ = balanced_density(model::FC2D; consvar, q, pref)
 
 Density of the fluid at rest with the tracers consvar(x, z) and q(x, z), on all cells (zero-gradient halo): each column is
 in discrete hydrostatic balance (the model's vertical momentum forcing vanishes on every interior face), with
-pressure `ptop` [Pa] in the top cell.
+pressure `pref` [Pa] at the height `space.z0` where the geopotential vanishes. As for the anelastic reference state,
+the pressure at z0 is that of the piecewise-linear interpolant of the pressures of the cell centers (extrapolated linearly
+from the two nearest interior cells if z0 is outside the box).
 """
-function balanced_density(model::FC2D{F}; consvar, q, ptop) where F
+function balanced_density(model::FC2D{F}; consvar, q, pref) where F
     (; mgr, domain, dx, dz) = model
     x(i) = cellpoint(domain, dx, 1, i); z(j) = cellpoint(domain, dz, 2, j)
     jc = interior_cells(domain, 2)
@@ -60,7 +62,7 @@ function balanced_density(model::FC2D{F}; consvar, q, ptop) where F
         for j in jc
             cons_column[j], q_column[j] = consvar(x(i), z(j)), q(x(i), z(j))
         end
-        ρ[i, :] .= balanced_column(model, cons_column, q_column, ptop, jc)
+        ρ[i, :] .= anchored_column(model, cons_column, q_column, pref, jc)
     end
     return fill_halo!(domain, ρ, ZeroGradient())
 end
@@ -111,6 +113,34 @@ end
     chem = fluid(:p, :consvar, :q).modified_chemical_potential(p, cons, q)
     B = fluid(:p, :consvar, :q).specific_enthalpy(p, cons, q) - conj * cons - chem * q
     return conj, chem, B
+end
+
+"""
+    ρ = anchored_column(model::FC2D, consvar, q, pref, jc)
+
+`balanced_column` with the pressure `pref` at the height z0 (see `balanced_density`): the pressure `ptop` in the top cell is
+found by secant iterations on the pressure at z0, which depends on `ptop` almost one for one.
+"""
+function anchored_column(model, consvar, q, pref, jc)
+    (; fluid, dz, space) = model
+    (; z0) = space
+    j_first, j_last = first(jc), last(jc)
+    z_cell(j) = cellpoint(model.domain, dz, 2, j)
+    j = clamp(floor(Int, (z0 - z_cell(j_first)) / dz) + j_first, j_first, j_last - 1)      # lower cell of the segment
+    function pressure_error(ptop)
+        ρ = balanced_column(model, consvar, q, ptop, jc)
+        p_1 = fluid(:v, :consvar, :q).pressure(inv(ρ[j]), consvar[j], q[j])
+        p_2 = fluid(:v, :consvar, :q).pressure(inv(ρ[j+1]), consvar[j+1], q[j+1])
+        return p_1 + (z0 - z_cell(j)) / dz * (p_2 - p_1) - pref
+    end
+    x0, x1 = pref, pref - pressure_error(pref)
+    f0, f1 = pressure_error(x0), pressure_error(x1)
+    for _ in 1:20
+        (f1 == f0 || abs(f1) <= 8eps(pref)) && break
+        x0, x1 = x1, x1 - f1 * (x1 - x0) / (f1 - f0)
+        f0, f1 = f1, pressure_error(x1)
+    end
+    return balanced_column(model, consvar, q, x1, jc)
 end
 
 """

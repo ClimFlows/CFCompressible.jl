@@ -177,24 +177,27 @@ function test_energy_budget(tend!, cell_energies, model, state; tol = 1e-12)
     return (; residual = abs(dE - input) / scale, input = input / scale)
 end
 
-# records the times at which `loop` calls its outputs, and whether it closes them
+# records the times at which `loop` calls its outputs, the diagnostics book it hands them, and whether it closes them
 mutable struct LoopRecord
     t::Vector{Float64}      # time of each call [s]
+    book::Any               # book of the last call
     closed::Bool            # `close` was called
     fail::Bool              # every call after t = 0 throws
 end
-LoopRecord(; fail = false) = LoopRecord(Float64[], false, fail)
+LoopRecord(; fail = false) = LoopRecord(Float64[], nothing, false, fail)
 function (r::LoopRecord)(model, state, dstate, scratch, book, t)
     r.fail && t > 0 && error("output failure")
     push!(r.t, t)
+    r.book = book
     return nothing
 end
 Base.close(r::LoopRecord) = (r.closed = true; nothing)
 
 #=
-a short run of `loop`: the outputs are called at t = 0 and at the end of each slice, then closed, also when an output
-throws; the state is advanced in place, stays finite, and with closed walls keeps its total mass and composition
-(`tracers = (; mass, q)` gives their indices in m, mass = nothing if not prognostic) to round-off
+a short run of `loop`: the outputs are called at t = 0 and at the end of each slice, with the `book` passed to `loop`
+if any, then closed, also when an output throws; the state is advanced in place, stays finite, and with closed walls
+keeps its total mass and composition (`tracers = (; mass, q)` gives their indices in m, mass = nothing if not
+prognostic) to round-off
 =#
 function test_loop(loop, time_scheme, model, state, (; mass, q), params; tol = 1e-12)
     (ic, jc) = interior_xz(model.domain)
@@ -209,4 +212,8 @@ function test_loop(loop, time_scheme, model, state, (; mass, q), params; tol = 1
     failing = LoopRecord(fail = true)
     @test_throws ErrorException redirect_stdout(() -> loop(copy_state(state), model, time_scheme, params; outputs = failing), devnull)
     @test failing.closed
+    # a book passed to `loop` reaches the outputs in place of the default one (loop only hands it on)
+    book, passed = (; label = "book passed to loop"), LoopRecord()
+    redirect_stdout(() -> loop(copy_state(state), model, time_scheme, (; params..., Nslice = 1); outputs = passed, book), devnull)
+    @test record.book !== nothing && passed.book === book
 end

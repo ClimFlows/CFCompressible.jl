@@ -14,11 +14,12 @@ using ManagedLoops: @vec, @with
 export loop
 
 """
-    state = loop(state, model::FC2D, time_scheme, params; outputs = nothing)
+    state = loop(state, model::FC2D, time_scheme, params; outputs = nothing, book = diagnostics(model))
 
 Main time integration loop of FC2D, see `CFCompressible.loop`.
 """
-function loop(state, model::FC2D{F}, time_scheme, params; outputs = nothing) where {F}
+function loop(state, model::FC2D{F}, time_scheme, params; outputs = nothing,
+              book = diagnostics(model)) where {F}
     (; Nslice, slice_size, dt_max, cfl) = params
 
     # initialize time
@@ -26,9 +27,6 @@ function loop(state, model::FC2D{F}, time_scheme, params; outputs = nothing) whe
 
     # create dstate and scratch space
     dstate, scratch = tendencies!(void, void, model, state, t)
-
-    # diagnostics, built once: the book owns the output arrays of its computed diagnostics
-    book = diagnostics(model)
 
     # the outputs are closed when the run ends, even on error
     try

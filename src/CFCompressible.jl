@@ -129,7 +129,7 @@ divergence_free_velocity(model::FC2D, ρ, ψ) = BoxInitialize.divergence_free_ve
 
 # specify main time integration loop
 """
-    state = loop(state, model::FC2D, time_scheme, params; outputs = nothing)
+    state = loop(state, model::FC2D, time_scheme, params; outputs = nothing, book = diagnostics(model))
 
 Main time integration loop for the FC2D model; advances `state` in place and returns it.
 - `model`: FC2D model instance
@@ -141,6 +141,8 @@ Main time integration loop for the FC2D model; advances `state` in place and ret
 - `outputs`: callable `outputs(model, state, dstate, scratch, book, t)`, called at t = 0 and at the end of each
   time slice, with the diagnostics `book` and the time `t` [s] (e.g. to record diagnostics), then closed with
   `close(outputs)` when the run ends, even on error; `nothing` records nothing
+- `book`: the diagnostics `CookBook` handed to `outputs`, e.g. one with more diagnostics than `diagnostics(model)`;
+  built once, as each session of it overwrites the same output arrays
 """
 loop(state, model::FC2D, time_scheme, params; kwargs...) = Loops.loop(state, model, time_scheme, params; kwargs...)
 

@@ -152,7 +152,7 @@ interior face, given the conservative variable and composition of the interior c
 """
 function balanced_column((; fluid, space, inv_dz), consvar, q, ptop, jc)
     (; g) = space
-    ρ = similar(consvar)
+    ρ = zero(consvar)        # defined in the halo too, which the caller fills
     jt = last(jc)
     ρ[jt] = inv(fluid(:p, :consvar, :q).specific_volume(ptop, consvar[jt], q[jt]))
     for j in jt-1:-1:first(jc)

@@ -130,6 +130,23 @@ const forced_box = (;
     end
 end
 
+# the balanced density in another float type: a small model in BigFloat matches the Float64 one
+@testset "FC2D balanced density in BigFloat" begin
+    function small_model(F)
+        domain = Box2D(; Mx = 4, Mz = 4)
+        return FC2D((; mgr = nothing, domain, space = Tank2D(Lx = F(Lx), Lz = F(Lz), g = F(g)),
+            fluid = NonlinearBinaryFluid(:potential_temperature, map(F, fluid_params)), spatial_scheme = Centred2(),
+            vortex_scheme = VortexEnergyCons(), thermoflux_scheme = ThermoFluxConsistent(k_T = F(1e-4), k_q = F(1e-5)),
+            viscosity_scheme = ViscosityScheme(dyn_visc = F(1e-3)),
+            boundary_conditions = BoxBoundaryConditions(domain; bottom = closed_wall(), top = closed_wall())))
+    end
+    density(F) = CFCompressible.balanced_density(small_model(F); consvar = (x, z) -> F(θ_active(x, z)),
+                                                 q = (x, z) -> F(q_active(x, z)), pref = F(1e5))
+    ρ = density(BigFloat)
+    @test eltype(ρ) == BigFloat
+    @test Float64.(ρ) ≈ density(Float64) rtol = 1e-12
+end
+
 # the balanced density has the pressure `pref` at the height z0 where the geopotential vanishes, inside or outside the box:
 # the pressure of the piecewise-linear interpolant of the cell-center pressures (linear extrapolation outside)
 @testset "FC2D balanced density anchored at z0" begin

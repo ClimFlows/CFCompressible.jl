@@ -148,7 +148,8 @@ end
 
 Densities ρ[j] of a column at rest in discrete balance: the vertical momentum forcing of the model vanishes on every
 interior face, given the conservative variable and composition of the interior cells `jc`, and the pressure `ptop`
-[Pa] in the top cell. Marches down, solving for each density with secant iterations to round-off.
+[Pa] in the top cell. Marches down, solving for each density with `bracketed_root`: in floating point the forcing is
+a staircase in ρ (its terms, of size h ~ c_p T, cancel), on which a plain secant iteration may wander without converging.
 """
 function balanced_column((; fluid, space, inv_dz), consvar, q, ptop, jc)
     (; g) = space
@@ -162,16 +163,47 @@ function balanced_column((; fluid, space, inv_dz), consvar, q, ptop, jc)
                                    cell_thermo(fluid, ρa, consvar[j], q[j])..., thermo_b...) - g
         # hydrostatic first guess, dρ = ρ g dz / c²
         c² = fluid(:v, :consvar, :q).sound_speed2(inv(ρb), cb, qb)
-        x0, x1 = ρb, ρb * (1 + g / (inv_dz * c²))
-        f0, f1 = forcing(x0), forcing(x1)
-        for _ in 1:50
-            (f1 == f0 || abs(x1 - x0) <= 4eps(x1)) && break
-            x0, x1 = x1, x1 - f1 * (x1 - x0) / (f1 - f0)
-            f0, f1 = f1, forcing(x1)
-        end
-        ρ[j] = x1
+        ρ[j] = bracketed_root(forcing, ρb, ρb * (1 + g / (inv_dz * c²)))
     end
     return ρ
+end
+
+"""
+    x = bracketed_root(f, x0, x1)
+
+A root of `f` from the first guesses `x0` and `x1`, to the resolution of the floating-point numbers: secant iterations
+until the root is bracketed (f changes sign between the last two iterates), then bisection of the bracket down to two
+adjacent numbers, returning the one where |f| is least. Without a bracket after 50 secant iterations (or once the
+secant stalls, f being the same at both iterates), the iterate of least |f| met so far. Unlike a plain secant, it
+cannot end on an arbitrary iterate when f is a staircase at round-off.
+"""
+function bracketed_root(f, x0, x1)
+    f0, f1 = f(x0), f(x1)
+    # the iterate of least |f| so far, returned if no bracket is found
+    best, f_best = abs(f0) < abs(f1) ? (x0, abs(f0)) : (x1, abs(f1))
+    # secant iterations until f changes sign between the last two iterates
+    for _ in 1:50
+        (iszero(f1) || signbit(f0) != signbit(f1)) && break
+        f1 == f0 && return best                                 # the secant stalls: no better estimate
+        x0, x1 = x1, x1 - f1 * (x1 - x0) / (f1 - f0)
+        f0, f1 = f1, f(x1)
+        abs(f1) < f_best && ((best, f_best) = (x1, abs(f1)))
+    end
+    iszero(f1) && return x1
+    signbit(f0) == signbit(f1) && return best                   # no bracket after 50 iterations
+    # bisection of the bracket [a, b], with f(a) of the sign of fa, until a and b are adjacent numbers
+    a, b, fa, fb = x0 < x1 ? (x0, x1, f0, f1) : (x1, x0, f1, f0)
+    while nextfloat(a) < b
+        m = (a + b) / 2                                         # strictly between a and b, as they are not adjacent
+        fm = f(m)
+        iszero(fm) && return m
+        if signbit(fm) == signbit(fa)
+            a, fa = m, fm                                       # the root is in [m, b]
+        else
+            b, fb = m, fm                                       # the root is in [a, m]
+        end
+    end
+    return abs(fa) <= abs(fb) ? a : b
 end
 
 end # module BoxInitialize

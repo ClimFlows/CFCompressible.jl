@@ -147,6 +147,19 @@ end
     @test Float64.(ρ) ≈ density(Float64) rtol = 1e-12
 end
 
+# the balanced density is a column at rest in discrete balance, to the resolution of the floating-point forcing: the
+# forcing -(δconjvar ϑ̄ + δμ q̄ + δB)/Δz - g is a difference of terms of size c_p T (B = h - conjvar ϑ - μ q, with
+# conjvar ≈ Cp0 for ϑ = θ), so it is a staircase in ρ with steps of a few eps Cp0 T0/Δz, and the root solver must
+# land on a step next to zero (a plain secant could wander to 20 times that)
+@testset "FC2D balanced density at rest to the resolution of the forcing" begin
+    model = fc_model(boundary = (Periodic, Bounded))
+    (; domain, dz) = model
+    ρ = CFCompressible.balanced_density(model; consvar = (x, z) -> θ_rest(z), q = (x, z) -> q_rest(z), pref = 1e5)
+    state = CFCompressible.initialize(model; density = ρ, consvar = (x, z) -> θ_rest(z), q = (x, z) -> q_rest(z))
+    dstate, _ = evaluate(fc_tend!, model, state)
+    @test maximum(abs, dstate.w[interior_xZ(domain)...]) < 4 * eps() * fluid.Cp0 * T0 / dz
+end
+
 # the balanced density has the pressure `pref` at the height z0 where the geopotential vanishes, inside or outside the box:
 # the pressure of the piecewise-linear interpolant of the cell-center pressures (linear extrapolation outside)
 @testset "FC2D balanced density anchored at z0" begin

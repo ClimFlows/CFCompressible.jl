@@ -9,7 +9,7 @@ makedocs(;
     authors="Thomas Dubos <thomas.dubos@polytechnique.edu> and contributors",
     sitename="CFCompressible.jl",
     format=Documenter.HTML(;
-        canonical="https://dubosipsl.github.io/CFCompressible.jl",
+        canonical="https://ClimFlows.github.io/CFCompressible.jl",
         edit_link="main",
         assets=String[],
     ),
@@ -19,6 +19,6 @@ makedocs(;
 )
 
 deploydocs(;
-    repo="github.com/dubosipsl/CFCompressible.jl",
+    repo="github.com/ClimFlows/CFCompressible.jl",
     devbranch="main",
 )
